@@ -16,6 +16,11 @@ Convention de nommage (cle de versions.json -> ARG du Dockerfile) :
     "c-icap"          -> C_ICAP_VERSION        (- et . deviennent _)
     "alpine"          -> aucun ARG : c'est le tag des lignes `FROM alpine:<tag>@sha256:`
                          (la base est epinglee par digest, un ARG n'y changerait rien)
+    "php"             -> aucun ARG si le Dockerfile a un `FROM php:<tag>@sha256:` : c'est
+                         la BRANCHE de cette image de base (8.5), que le tag doit suivre
+                         (8.5.11-fpm-alpine). Cle d'image de base = nom d'une image
+                         d'un FROM ; alpine est le cas particulier ou le tag doit etre
+                         la valeur exacte.
 
 Usage :
     versions-build-args.py              lignes NOM=valeur (build-args de la CI)
@@ -61,9 +66,28 @@ def load_versions(path):
     return data
 
 
-def build_args(versions):
-    """[(ARG, valeur)] dans l'ordre de versions.json, cles speciales exclues."""
-    return [(key_to_arg(k), v) for k, v in versions.items() if key_to_arg(k)]
+def build_args(versions, base_keys=()):
+    """[(ARG, valeur)] dans l'ordre de versions.json, cles speciales et cles
+    d'image de base exclues (elles ne nourrissent aucun ARG)."""
+    return [(key_to_arg(k), v) for k, v in versions.items()
+            if key_to_arg(k) and k not in base_keys]
+
+
+def image_name(ref):
+    """Nom court d'une reference d'image : docker.io/library/php:8.5@sha256:... -> php."""
+    name = ref.split("@", 1)[0]
+    head, _, last = name.rpartition("/")
+    name = (head + "/" if head else "") + last.split(":", 1)[0]
+    for prefix in ("docker.io/library/", "docker.io/", "library/"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def base_image_keys(versions, froms):
+    """Cles de versions.json qui nomment une image de base d'un FROM (hors alpine)."""
+    used = {image_name(ref) for _, ref in froms}
+    return {k for k in versions if k not in SPECIAL_KEYS and k in used}
 
 
 # --------------------------------------------------------------------------
@@ -206,10 +230,10 @@ def check(root="."):
     root = Path(root)
     errors = []
     versions = load_versions(root / "versions.json")
-    expected = {key_to_arg(k): k for k in versions if key_to_arg(k)}
-
     dockerfile = (root / "Dockerfile").read_text()
     args, froms = parse_dockerfile(dockerfile)
+    base_keys = base_image_keys(versions, froms)
+    expected = {key_to_arg(k): k for k in versions if key_to_arg(k) and k not in base_keys}
     declared = {}
     for n, name, default in args:
         if not VERSION_ARG.match(name):
@@ -247,6 +271,21 @@ def check(root="."):
     if alpine is not None and not alpine_froms:
         errors.append("versions.json : .alpine mais aucune ligne FROM alpine:<tag>@sha256 (cle morte)")
 
+    # Image de base suivie par branche : `"php": "8.5"` exige que chaque
+    # FROM php: soit epingle par digest ET dans la branche 8.5 (8.5.11-fpm-alpine).
+    # Un FROM passe en 8.6 pendant que version-watch suit 8.5 serait une 2e source.
+    for key in sorted(base_keys):
+        branch = versions[key]
+        for n, ref in froms:
+            if image_name(ref) != key:
+                continue
+            m = re.match(r"^[^@]+:([^@:]+)@sha256:[0-9a-f]{64}$", ref)
+            if not m:
+                errors.append(f"Dockerfile:{n} : FROM {ref} -- l'image de base .{key} doit etre epinglee tag@sha256")
+            elif not (m.group(1) == branch or m.group(1).startswith((branch + ".", branch + "-"))):
+                errors.append(f"Dockerfile:{n} : FROM {key}:{m.group(1)} hors de la branche "
+                              f".{key} = {branch} de versions.json")
+
     wf = root / ".github/workflows/build-push.yml"
     if wf.exists():
         errors += check_workflow(wf.read_text(), str(wf.relative_to(root)))
@@ -276,7 +315,10 @@ def main(argv):
             return 1
         print("versions-build-args: versions.json est la seule source des versions du build")
         return 0
-    pairs = build_args(load_versions("versions.json"))
+    versions = load_versions("versions.json")
+    df = Path("Dockerfile")
+    base = base_image_keys(versions, parse_dockerfile(df.read_text())[1]) if df.exists() else set()
+    pairs = build_args(versions, base)
     if argv[1:] == ["--docker"]:
         print(" ".join(shlex.quote(f"--build-arg={a}={v}") for a, v in pairs))
     elif len(argv) == 1:
