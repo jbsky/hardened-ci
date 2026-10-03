@@ -1,0 +1,105 @@
+# =====================================================================
+#  Registry Cleanup -- prune old immutable version tags
+#  (reusable workflow, `on: workflow_call` only).
+#
+#  build-push publishes a new immutable tag (<version>.<revision>) on every
+#  run, on Docker Hub and GHCR, and never retires the previous one. Old tags
+#  pile up and end up pointing at genuinely vulnerable builds that stay
+#  publicly pullable (nginx-hardened 1.30.1/1.30.2 were still live months
+#  after the CVE fix landed in 1.30.3). This workflow keeps the last
+#  `keep-count` tags plus :latest; the short version tags are protected by
+#  the prune scripts themselves.
+#
+#  Callers:
+#
+#    cleanup:                       # in build-push.yml, after promotion
+#      needs: promote
+#      permissions: {contents: read, packages: write}
+#      uses: jbsky/hardened-ci/.github/workflows/registry-cleanup.yml@<sha> # vX.Y.Z
+#      with:
+#        images: '["php-fpm-hardened"]'
+#      secrets:
+#        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+#        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+#
+#  Secrets are passed explicitly: `secrets: inherit` is not guaranteed across
+#  repositories of a personal account. Without Docker Hub secrets, only GHCR
+#  is pruned (the behaviour of the per-repository copies).
+#
+#  No schedule and no dispatch HERE: this repository has no image, and
+#  pruning runs against the caller's packages. Not exercised by test.yml
+#  either -- it deletes tags; it is linted, and proved on a canary by
+#  comparing tag lists before/after.
+#
+#  Step 1 of the shared-CI plan: the prune scripts are still the caller's
+#  vendored copies (`./scripts/prune-*.sh`, checked out from the caller);
+#  they move into a composite action at step 2.
+# =====================================================================
+name: registry-cleanup
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: 'JSON list of the image names to prune, e.g. ["squid-hardened","c-icap-hardened"]'
+        type: string
+        required: true
+      keep-count:
+        # Counts TAGS, not upstream versions: every build pushes its own
+        # revisioned tag, so 3 would mean "the last 3 builds" and retire the
+        # previous upstream version almost immediately. 6 keeps a few
+        # revisions of the current version plus room for the one before.
+        description: Number of immutable tags to keep per image (plus :latest)
+        type: number
+        default: 6
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prune:
+    name: Prune old tags -- ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One image failing (GHCR 502s on deep pagination happen) must not
+      # cancel the pruning of the others and force a full re-run.
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(inputs.images) }}
+    steps:
+      # Checks out the CALLER: its vendored prune scripts (step 1).
+      - uses: actions/checkout@v7
+
+      - name: Check Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prune old Docker Hub tags
+        if: steps.dockerhub.outputs.available == 'true'
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE: ${{ matrix.image }}
+          KEEP: ${{ inputs.keep-count }}
+        run: ./scripts/prune-registry-tags.sh "$DOCKERHUB_USERNAME" "$IMAGE" "$KEEP"
+
+      - name: Prune old GHCR tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          IMAGE: ${{ matrix.image }}
+          KEEP: ${{ inputs.keep-count }}
+        run: ./scripts/prune-ghcr-tags.sh "$OWNER" "$IMAGE" "$KEEP"
