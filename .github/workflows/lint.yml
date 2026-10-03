@@ -1,0 +1,29 @@
+# =====================================================================
+#  Lint -- every workflow and action in this repository is consumed by
+#  seven image pipelines: a syntax error here breaks all of them at their
+#  next bump. actionlint runs ShellCheck on every `run:` block too.
+# =====================================================================
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Image epinglee par version : pas de `curl | sh` d'un script tiers.
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
