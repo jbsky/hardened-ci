@@ -1,0 +1,7 @@
+services:
+  app:
+    # Pas de build.args : `make build` passe --build-arg depuis versions.json.
+    # Un `docker compose build` nu echoue au garde du Dockerfile.
+    build:
+      context: .
+    image: localhost/app-hardened:latest
