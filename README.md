@@ -12,6 +12,66 @@ repository is meant to hold them once:
 | Reusable workflows (`on: workflow_call`) | whole jobs | `cve-watch`, `registry-cleanup`, `security-audit`, later `build-push` |
 | Composite actions (`action.yml`) | steps + their scripts (via `github.action_path`) | revision counter, image manifest, dependency closure, README tags |
 
+## The pipeline of an image repository
+
+What every `*-hardened` repository runs, and where this repository plugs in.
+Shared blocks are highlighted; the others are still local to each image
+repository, with the plan step that will move them here.
+
+```mermaid
+flowchart LR
+  subgraph BP["build-push.yml -- push to main, tag v*, pull request"]
+    direction LR
+    lint["lint<br/>hadolint, ShellCheck, gofmt/vet/test<br/>VENDORED.sha256<br/>versions --check"]
+    build["build (amd64)<br/>versions -> build-args<br/>prep scanned (Trivy, SBOM)<br/>push by digest / PR: tarball"]
+    arm["build-arm64<br/>versions -> build-args<br/>QEMU, push by digest"]
+    test["test<br/>pull the digest, healthy,<br/>version assert, manifest,<br/>closure, smoke tests"]
+    rev["revision<br/>&lt;version&gt;.&lt;revision&gt;<br/>already published? skip"]
+    promote["promote<br/>tags on the TESTED digest<br/>cosign sign, SBOM attest"]
+    readme["update-readme"]
+    cleanup["cleanup<br/>(registry-cleanup)"]
+    release["release (tags v*)"]
+    notify["notify<br/>issue on failure"]
+    lint --> build --> test --> promote
+    lint --> arm --> promote
+    rev --> promote
+    promote --> readme
+    promote --> cleanup
+    promote --> release
+    rev --> release
+    readme & cleanup & release -.-> notify
+  end
+  subgraph SCHED["scheduled"]
+    direction TB
+    cve["cve-watch.yml (daily)<br/>verify SBOM attestation on :latest,<br/>Trivy, one 'cve' issue per image"]
+    audit["security-audit.yml (weekly)<br/>main is published? Trivy, Grype,<br/>cosign verify"]
+    vw["version-watch.yml<br/>bump versions.json only"]
+  end
+  vw -. "commit on main" .-> lint
+  promote -. ":latest + SBOM" .-> cve
+  promote -. ":latest" .-> audit
+
+  classDef shared fill:#d7f0dd,stroke:#2e7d32,color:#1b3d20
+  classDef local fill:#f4f4f4,stroke:#9e9e9e,color:#333
+  class cve,cleanup shared
+  class lint,build,arm,test,rev,promote,readme,release,notify,audit,vw local
+```
+
+| Block | Lives in | Since / plan |
+|---|---|---|
+| `versions` check + build-args (in lint, build, build-arm64) | **hardened-ci** action `versions/` | v0.1.0 -> v0.7.0, on all 7 |
+| `cve-watch` | **hardened-ci** reusable workflow | v0.3.0, step 1 |
+| `registry-cleanup` (cleanup job) | **hardened-ci** reusable workflow, runs the caller's `prune-*` | v0.3.0, step 1 |
+| 6 vendored scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | each repository + `VENDORED.sha256` | step 2: composite actions |
+| `security-audit` | each repository | step 3 |
+| `build-push` jobs (lint ... notify) | each repository | step 4, after the signing identity move (cve-watch already accepts both identities) |
+| `version-watch` | each repository | stays local (logic is per upstream) |
+
+On a pull request the image is built and tested from a tarball, never pushed:
+`build-arm64`, `revision`, `promote` and what follows are skipped (bind9 adds a
+`validate` job that builds both architectures on PRs). A `push` run re-tests the
+exact digest it will tag -- a gate green on the PR is not proof for the push.
+
 Building blocks land one at a time, each one first adopted by a single canary
 repository. Every block is tested here **both ways**: it passes on a conforming
 fixture and it must FAIL on a fixture with one injected defect
