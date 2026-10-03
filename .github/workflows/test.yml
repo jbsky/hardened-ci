@@ -83,7 +83,7 @@ jobs:
       - name: Le workflow du gabarit est valide (actionlint)
         uses: docker://rhysd/actionlint:1.7.12
         with:
-          args: -color _img/.github/workflows/build-push.yml
+          args: -color _img/.github/workflows/build-push.yml _img/.github/workflows/cve-watch.yml
 
       - name: Le controle attrape une version recopiee en dur
         working-directory: _img
