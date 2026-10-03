@@ -117,3 +117,70 @@ jobs:
           got=$(cat out/VERSION)
           echo "versions.json: ${want} | image: ${got}"
           [ "$want" = "$got" ]
+
+  # La logique des issues `cve` est rejouee sur le script EXTRAIT du workflow
+  # livre (pas une copie) contre un faux client GitHub : creation, liste
+  # inchangee = rien, liste changee, fermeture, « audit impossible » unique,
+  # selftest. Le cas « liste changee » a trouve un vrai bug (marqueur tronque).
+  cve-watch-issues:
+    name: cve-watch -- logique des issues
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Extraire le script du workflow livre
+        run: |
+          python3 - <<'PY'
+          import yaml
+          w = yaml.safe_load(open('.github/workflows/cve-watch.yml'))
+          steps = [s for s in w['jobs']['watch']['steps'] if s.get('name') == 'Issue cve']
+          assert len(steps) == 1, "etape 'Issue cve' introuvable"
+          open('/tmp/cve-watch.js', 'w').write(steps[0]['with']['script'])
+          PY
+
+      - name: Rejouer les cas
+        env:
+          SCRIPT_FILE: /tmp/cve-watch.js
+        run: node tests/cve-watch/issue.test.js
+
+  # La detection, dans les deux sens, sur deux SBOM figees : alpine:3.24@28bd
+  # (libcrypto3/libssl3 3.5.7, vulnerable pour toujours) DOIT sortir
+  # CVE-2026-14456 ; la meme SBOM reduite a un paquet fictif ne doit RIEN
+  # sortir. Pas de SBOM reelle « propre aujourd'hui » : elle rougirait le
+  # jour ou une CVE tombe dessus, sans aucun commit.
+  cve-watch-scan:
+    name: cve-watch -- detection (vulnerable / propre)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: SBOM vulnerable
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: sbom
+          scan-ref: tests/fixtures/sbom/vulnerable.cdx.json
+          format: json
+          output: vulnerable.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: SBOM propre
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: sbom
+          scan-ref: tests/fixtures/sbom/clean.cdx.json
+          format: json
+          output: clean.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: La vulnerable remonte, la propre non
+        run: |
+          set -euo pipefail
+          n_vuln=$(jq '[.Results[]?.Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-14456")] | length' vulnerable.json)
+          n_clean=$(jq '[.Results[]?.Vulnerabilities[]?] | length' clean.json)
+          echo "vulnerable: ${n_vuln} x CVE-2026-14456 | propre: ${n_clean}"
+          [ "$n_vuln" -ge 1 ] || { echo "::error::la SBOM vulnerable n'a pas remonte CVE-2026-14456"; exit 1; }
+          [ "$n_clean" -eq 0 ] || { echo "::error::la SBOM propre a remonte ${n_clean} CVE"; exit 1; }

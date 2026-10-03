@@ -55,6 +55,60 @@ build fails at the Dockerfile guard in under a second.
 `scripts/test_versions_build_args.py` holds one test per rule: each injects a
 single defect into a conforming repository and requires the matching error.
 
+### `cve-watch` -- daily re-audit of the published image (reusable workflow)
+
+The final images are `FROM scratch`: no apk database, a scanner sees nothing.
+`build-push` attests a CycloneDX SBOM of the `prep` stage on every published
+digest; `cve-watch` verifies that attestation on `:latest` (signed by the
+caller's `build-push.yml`, or by this repository's once `build-push` is shared),
+runs Trivy on it, and keeps one `cve` issue per image: opened on a fixable
+HIGH/CRITICAL CVE, commented when the list changes, closed when it is empty.
+No SBOM = one "audit impossible" issue, never a silent "0 CVE". The issue
+mentions the repository owner, so the e-mail does not depend on Watch settings.
+
+```yaml
+on:
+  schedule: [{cron: '30 5 * * *'}]
+  workflow_dispatch:
+    inputs: {selftest: {type: boolean, default: false}}
+permissions: {contents: read, issues: write, packages: read}
+jobs:
+  watch:
+    uses: jbsky/hardened-ci/.github/workflows/cve-watch.yml@<sha> # vX.Y.Z
+    with:
+      images: '["php-fpm-hardened"]'
+      selftest: ${{ inputs.selftest == true }}
+```
+
+`selftest: true` scans a known vulnerable image under a separate issue: the
+end-to-end proof that an alert reaches the mailbox. Tested here both ways: the
+issue logic is replayed on the script extracted from the shipped workflow
+(`tests/cve-watch/issue.test.js`), and detection on two frozen SBOMs (one
+vulnerable forever, one with a single fictitious package).
+
+### `registry-cleanup` -- prune old immutable tags (reusable workflow)
+
+Keeps the last `keep-count` (default 6) immutable tags per image plus
+`:latest`, on GHCR and, when its secrets are passed, Docker Hub. Secrets are
+passed explicitly (`secrets: inherit` is not guaranteed across repositories of
+a personal account), and the calling job must grant `packages: write`.
+
+```yaml
+cleanup:
+  needs: promote
+  permissions: {contents: read, packages: write}
+  uses: jbsky/hardened-ci/.github/workflows/registry-cleanup.yml@<sha> # vX.Y.Z
+  with:
+    images: '["php-fpm-hardened"]'
+  secrets:
+    DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+```
+
+Not exercised by `test.yml` (it deletes tags): linted here, proved on a canary
+by comparing tag lists before and after. Until step 2 it runs the caller's
+vendored `scripts/prune-*.sh`.
+
 ### `template/` -- starting point of a new image repository
 
 `./scripts/new-image.sh ../<app>-hardened` copies `template/` and adds the
