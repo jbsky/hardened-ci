@@ -35,7 +35,9 @@ import shlex
 import sys
 from pathlib import Path
 
-VERSION_ARG = re.compile(r"^[A-Z][A-Z0-9_]*_(VERSION|SHA256|COMMIT)$")
+# `_VER` aussi : nginx portait NGINX_VER="" (vide = resolution de la derniere
+# version amont au build), invisible tant que seul `_VERSION` etait reconnu.
+VERSION_ARG = re.compile(r"^[A-Z][A-Z0-9_]*_(VERSION|VER|SHA256|COMMIT)$")
 # Une etape produit les build-args si elle appelle ce script, ou l'action
 # composite de jbsky/hardened-ci qui l'enveloppe.
 GENERATORS = ("versions-build-args.py", "jbsky/hardened-ci/versions@")
@@ -223,7 +225,7 @@ def check_workflow(text, label):
 # --------------------------------------------------------------------------
 #  Le controle
 # --------------------------------------------------------------------------
-ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*_(?:VERSION|SHA256|COMMIT))\s*(?::=|\?=|=|:)\s*(\S+)")
+ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*_(?:VERSION|VER|SHA256|COMMIT))\s*(?::=|\?=|=|:)\s*(\S+)")
 
 
 def check(root="."):
