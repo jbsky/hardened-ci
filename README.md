@@ -46,7 +46,10 @@ shipped 7.7.3 while CI published 8.0.0; an `.env.example` still said 8.0.2 when
 Naming rule: key `foo` -> `FOO_VERSION`, `foo_sha256` -> `FOO_SHA256`,
 `foo_commit` -> `FOO_COMMIT`, `c-icap` -> `C_ICAP_VERSION`; `alpine` is the tag
 of the `FROM alpine` lines (the base is pinned by digest, an ARG would drive
-nothing).
+nothing). More generally, a key named after the base image of a `FROM` (`php`
+for `FROM php:8.5.11-fpm-alpine@sha256:...`) feeds no ARG: it is the branch
+that image follows, and every `FROM php:` must be digest-pinned and tagged
+inside it (`8.5` accepts `8.5.11-fpm-alpine`, rejects `8.6.0` and `8.50.1`).
 
 Local builds use the same script: `make build` runs
 `docker compose build $(scripts/versions-build-args.py --docker)`; a bare

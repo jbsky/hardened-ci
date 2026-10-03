@@ -155,6 +155,36 @@ class CheckTest(unittest.TestCase):
         self.repo.edit("Dockerfile", f"alpine:3.24@{DIGEST} AS prep", "alpine:3.24 AS prep")
         self.assertCaught("alpine doit etre epinglee tag@sha256")
 
+    # --- image de base suivie par branche (php : "php": "8.5") ------------
+    def _image_de_base(self, from_ref):
+        v = dict(VERSIONS, php="8.5")
+        self.repo.write("versions.json", json.dumps(v))
+        self.repo.edit("Dockerfile", f"FROM alpine:3.24@{DIGEST} AS builder",
+                       f"FROM {from_ref} AS phpbase\nFROM alpine:3.24@{DIGEST} AS builder")
+
+    def test_image_de_base_dans_la_branche_passe(self):
+        self._image_de_base(f"php:8.5.11-fpm-alpine@{DIGEST}")
+        self.assertEqual(self.repo.errors(), [])
+
+    def test_image_de_base_hors_branche(self):
+        self._image_de_base(f"php:8.6.0-fpm-alpine@{DIGEST}")
+        self.assertCaught("FROM php:8.6.0-fpm-alpine hors de la branche .php = 8.5")
+
+    def test_image_de_base_prefixe_trompeur(self):
+        # 8.50 n'est pas dans la branche 8.5 : la branche se termine par . ou -
+        self._image_de_base(f"php:8.50.1-fpm-alpine@{DIGEST}")
+        self.assertCaught("hors de la branche .php = 8.5")
+
+    def test_image_de_base_sans_digest(self):
+        self._image_de_base("php:8.5.11-fpm-alpine")
+        self.assertCaught("l'image de base .php doit etre epinglee tag@sha256")
+
+    def test_cle_sans_image_de_base_reste_morte(self):
+        # Sans FROM php:, la cle php redevient une version qui doit nourrir PHP_VERSION.
+        v = dict(VERSIONS, php="8.5")
+        self.repo.write("versions.json", json.dumps(v))
+        self.assertCaught(".php n'alimente aucun ARG PHP_VERSION")
+
     def test_ancre_de_confiance_non_concernee(self):
         # OISF_FPR (empreinte de cle) n'est pas une version : sa valeur en dur est voulue.
         self.assertFalse(any("OISF_FPR" in e for e in self.repo.errors()))
@@ -216,6 +246,19 @@ class GenerateurTest(unittest.TestCase):
     def test_build_args_sans_alpine(self):
         self.assertEqual(vba.build_args(VERSIONS), [
             ("APP_VERSION", "1.2.3"), ("APP_SHA256", "f" * 64), ("TCC_COMMIT", "abc123")])
+
+    def test_build_args_sans_cle_d_image_de_base(self):
+        v = dict(VERSIONS, php="8.5")
+        self.assertEqual(vba.build_args(v, {"php"}), vba.build_args(VERSIONS))
+
+    def test_nom_d_image(self):
+        for ref, name in ((f"php:8.5.11-fpm-alpine@{DIGEST}", "php"),
+                          (f"docker.io/library/php:8.5@{DIGEST}", "php"),
+                          ("ghcr.io/jbsky/foo:1.0", "ghcr.io/jbsky/foo"),
+                          ("localhost:5000/foo:1", "localhost:5000/foo"),
+                          ("scratch", "scratch")):
+            with self.subTest(ref=ref):
+                self.assertEqual(vba.image_name(ref), name)
 
     def _load(self, data):
         with tempfile.TemporaryDirectory() as d:
