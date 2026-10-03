@@ -1,0 +1,65 @@
+# =====================================================================
+#  Test -- ce depot fait autorite pour sept pipelines : chaque brique est
+#  eprouvee ici, dans les deux sens (elle passe sur un depot conforme, elle
+#  ECHOUE sur un depot fautif), avant qu'un appelant ne bumpe son SHA.
+# =====================================================================
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Tests unitaires des scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+  versions-action:
+    name: Action versions (conforme / fautif)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Depot conforme -- doit passer
+        id: ok
+        uses: ./versions
+        with:
+          path: tests/fixtures/conforme
+
+      - name: Build-args produits
+        env:
+          ARGS: ${{ steps.ok.outputs.build-args }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$ARGS"
+          expected=$(printf 'APP_VERSION=1.2.3\nAPP_SHA256=%s' "$(printf 'f%.0s' $(seq 64))")
+          [ "$ARGS" = "$expected" ] || { echo "::error::build-args inattendus"; exit 1; }
+
+      # Le meme depot, avec UNE version recopiee en dur dans le Dockerfile.
+      - name: Injecter une version par defaut
+        run: |
+          cp -r tests/fixtures/conforme /tmp/fautif
+          sed -i 's/^ARG APP_VERSION$/ARG APP_VERSION=1.2.3/' /tmp/fautif/Dockerfile
+          grep -q '^ARG APP_VERSION=1.2.3$' /tmp/fautif/Dockerfile
+
+      - name: Depot fautif -- doit echouer
+        id: ko
+        continue-on-error: true
+        uses: ./versions
+        with:
+          path: /tmp/fautif
+
+      - name: Le controle a bien echoue
+        if: steps.ko.outcome != 'failure'
+        run: |
+          echo "::error::l'action a laisse passer ARG APP_VERSION=1.2.3"
+          exit 1

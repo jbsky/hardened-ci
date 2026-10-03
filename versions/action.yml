@@ -1,0 +1,48 @@
+# =====================================================================
+#  versions -- versions.json, seule source des versions du build.
+#
+#  1. Controle (scripts/versions-build-args.py --check) : echoue si une
+#     version est ecrite ailleurs (ARG avec valeur par defaut, copie dans
+#     .env.example/compose/Makefile), si une cle ou un ARG est orphelin,
+#     si un ARG n'a pas de garde, si un FROM alpine diverge de .alpine,
+#     ou si une etape docker/build-push-action ne recoit pas les
+#     build-args generes.
+#  2. Sortie `build-args` : NOM=valeur par ligne, a passer tel quel a
+#     docker/build-push-action (`build-args: ${{ steps.<id>.outputs.build-args }}`).
+#
+#  Le script est celui de CE depot, a la ref epinglee par l'appelant
+#  (github.action_path) : aucune copie a tenir a jour.
+# =====================================================================
+name: versions
+description: versions.json comme seule source des versions du build -- controle + build-args
+inputs:
+  path:
+    description: Racine du depot d'image (versions.json, Dockerfile, .github/workflows/build-push.yml)
+    default: .
+  check:
+    description: "'false' pour sauter le controle (seulement produire les build-args)"
+    default: 'true'
+outputs:
+  build-args:
+    description: Lignes NOM=valeur pour docker/build-push-action
+    value: ${{ steps.gen.outputs.build-args }}
+runs:
+  using: composite
+  steps:
+    - name: Controle de la source unique
+      if: inputs.check == 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: python3 "$GITHUB_ACTION_PATH/../scripts/versions-build-args.py" --check
+    - name: Build-args depuis versions.json
+      id: gen
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        args=$(python3 "$GITHUB_ACTION_PATH/../scripts/versions-build-args.py")
+        {
+          echo 'build-args<<EOF'
+          printf '%s\n' "$args"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
