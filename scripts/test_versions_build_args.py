@@ -218,6 +218,25 @@ class CheckTest(unittest.TestCase):
                        "          target: prep\n          build-args: |\n            APP_VERSION=1.2.3\n")
         self.assertCaught("etape « Build prep stage » : build-args ne vient pas de versions-build-args.py")
 
+    def test_matrice_avant_les_steps(self):
+        # Une strategy.matrix (liste de `- name:`) avant `steps:` ne doit pas
+        # masquer les vraies etapes du job.
+        self.repo.write(".github/workflows/build-push.yml", WORKFLOW + """  build-arm64:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image:
+          - name: app
+            context: app/
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build arm64
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.image.context }}
+""")
+        self.assertCaught("job build-arm64, etape « Build arm64 » : build-args ne vient pas de versions-build-args.py")
+
     def test_generateur_absent_du_job(self):
         self.repo.edit(".github/workflows/build-push.yml",
                        "{ echo 'build-args<<EOF'; ./scripts/versions-build-args.py; echo 'EOF'; }",

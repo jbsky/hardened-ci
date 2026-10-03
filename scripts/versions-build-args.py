@@ -172,9 +172,28 @@ def workflow_jobs(text):
 
 
 def steps_of(lines):
-    """Decoupe les lignes d'un job en etapes (`- ` a l'indentation des steps)."""
+    """Decoupe le bloc `steps:` d'un job en etapes (`- ` a l'indentation des steps).
+
+    Seul le bloc `steps:` compte : une `strategy.matrix` declaree avant (liste
+    `- name: ...`) etait prise pour les etapes, et les vraies etapes du job
+    n'etaient plus examinees -- un build sans build-args passait en vert
+    (job build-dockerfile de squid-hardened, 2026-10-03)."""
+    start = None
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)steps:\s*$", line)
+        if m:
+            start, base = i + 1, len(m.group(1))
+            break
+    if start is None:
+        return []
+    block = []
+    for line in lines[start:]:
+        if line.strip() and not line.lstrip().startswith("#") and len(line) - len(line.lstrip()) <= base \
+                and not line.lstrip().startswith("- "):
+            break  # fin du bloc steps: (cle suivante du job)
+        block.append(line)
     steps, cur, indent = [], None, None
-    for line in lines:
+    for line in block:
         m = re.match(r"^(\s*)- ", line)
         if m and (indent is None or len(m.group(1)) == indent):
             if indent is None:
