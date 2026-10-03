@@ -43,6 +43,11 @@ shipped 7.7.3 while CI published 8.0.0; an `.env.example` still said 8.0.2 when
    `NAME_VERSION=value` copy in `.env.example`, compose or the Makefile.
 2. **Output** `build-args`: one `NAME=value` per line.
 
+A repository that publishes several images from one `versions.json` (one
+`Dockerfile` per subdirectory, no root `Dockerfile`) is checked as a whole: a
+key must feed an ARG in at least one of them, and each ARG's guard is looked
+up in the Dockerfile that consumes it.
+
 Naming rule: key `foo` -> `FOO_VERSION`, `foo_sha256` -> `FOO_SHA256`,
 `foo_commit` -> `FOO_COMMIT`, `foo_tag` -> `FOO_TAG`, `c-icap` -> `C_ICAP_VERSION`; `alpine` is the tag
 of the `FROM alpine` lines (the base is pinned by digest, an ARG would drive
