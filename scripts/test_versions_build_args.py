@@ -130,6 +130,16 @@ class CheckTest(unittest.TestCase):
         self.repo.edit("Dockerfile", "    TCC_COMMIT\n", "    TCC_COMMIT=abc123\n")
         self.assertCaught("ARG TCC_COMMIT=abc123 -- valeur par defaut interdite")
 
+    def test_suffixe_ver_vide_reconnu(self):
+        # Cas nginx : ARG NGINX_VER="" et resolution amont quand il est vide.
+        self.repo.edit("Dockerfile", "ARG OISF_FPR", 'ARG NGINX_VER=""\nARG OISF_FPR')
+        self.assertCaught('ARG NGINX_VER= -- valeur par defaut interdite')
+        self.assertCaught("ARG NGINX_VER sans cle dans versions.json")
+
+    def test_copie_suffixe_ver_dans_makefile(self):
+        self.repo.write("Makefile", "NGINX_VER := 1.30.5\n" + MAKEFILE)
+        self.assertCaught("Makefile:1 : NGINX_VER=1.30.5 -- copie")
+
     def test_version_hors_versions_json(self):
         self.repo.edit("Dockerfile", "ARG OISF_FPR", "ARG LIBFOO_VERSION\nARG OISF_FPR")
         self.assertCaught("ARG LIBFOO_VERSION sans cle dans versions.json")

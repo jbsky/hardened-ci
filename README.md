@@ -35,7 +35,7 @@ shipped 7.7.3 while CI published 8.0.0; an `.env.example` still said 8.0.2 when
 ```
 
 1. **Check** (`scripts/versions-build-args.py --check`) fails on: a version ARG
-   (`*_VERSION`, `*_SHA256`, `*_COMMIT`) with a default value; an ARG with no
+   (`*_VERSION`, `*_VER`, `*_SHA256`, `*_COMMIT`) with a default value; an ARG with no
    key, or a key feeding no ARG; an ARG without a fail-fast guard; a
    `FROM alpine:<tag>@sha256` whose tag differs from `.alpine`, or with no
    digest; a `docker/build-push-action` step not fed by the generated
