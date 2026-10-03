@@ -35,7 +35,7 @@ shipped 7.7.3 while CI published 8.0.0; an `.env.example` still said 8.0.2 when
 ```
 
 1. **Check** (`scripts/versions-build-args.py --check`) fails on: a version ARG
-   (`*_VERSION`, `*_VER`, `*_SHA256`, `*_COMMIT`) with a default value; an ARG with no
+   (`*_VERSION`, `*_VER`, `*_SHA256`, `*_COMMIT`, `*_TAG`) with a default value; an ARG with no
    key, or a key feeding no ARG; an ARG without a fail-fast guard; a
    `FROM alpine:<tag>@sha256` whose tag differs from `.alpine`, or with no
    digest; a `docker/build-push-action` step not fed by the generated
@@ -44,7 +44,7 @@ shipped 7.7.3 while CI published 8.0.0; an `.env.example` still said 8.0.2 when
 2. **Output** `build-args`: one `NAME=value` per line.
 
 Naming rule: key `foo` -> `FOO_VERSION`, `foo_sha256` -> `FOO_SHA256`,
-`foo_commit` -> `FOO_COMMIT`, `c-icap` -> `C_ICAP_VERSION`; `alpine` is the tag
+`foo_commit` -> `FOO_COMMIT`, `foo_tag` -> `FOO_TAG`, `c-icap` -> `C_ICAP_VERSION`; `alpine` is the tag
 of the `FROM alpine` lines (the base is pinned by digest, an ARG would drive
 nothing). More generally, a key named after the base image of a `FROM` (`php`
 for `FROM php:8.5.11-fpm-alpine@sha256:...`) feeds no ARG: it is the branch

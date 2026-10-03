@@ -13,6 +13,7 @@ Convention de nommage (cle de versions.json -> ARG du Dockerfile) :
     "suricata"        -> SURICATA_VERSION
     "libhtp_sha256"   -> LIBHTP_SHA256
     "tcc_commit"      -> TCC_COMMIT
+    "json-c_tag"      -> JSON_C_TAG          (tag git amont, ex. json-c-0.19-20260627)
     "c-icap"          -> C_ICAP_VERSION        (- et . deviennent _)
     "alpine"          -> aucun ARG : c'est le tag des lignes `FROM alpine:<tag>@sha256:`
                          (la base est epinglee par digest, un ARG n'y changerait rien)
@@ -37,7 +38,9 @@ from pathlib import Path
 
 # `_VER` aussi : nginx portait NGINX_VER="" (vide = resolution de la derniere
 # version amont au build), invisible tant que seul `_VERSION` etait reconnu.
-VERSION_ARG = re.compile(r"^[A-Z][A-Z0-9_]*_(VERSION|VER|SHA256|COMMIT)$")
+# `_TAG` : bind9 ecrivait JSONC_TAG=json-c-0.19-20260627 en dur, une version
+# que rien ne comparait a versions.json.
+VERSION_ARG = re.compile(r"^[A-Z][A-Z0-9_]*_(VERSION|VER|SHA256|COMMIT|TAG)$")
 # Une etape produit les build-args si elle appelle ce script, ou l'action
 # composite de jbsky/hardened-ci qui l'enveloppe.
 GENERATORS = ("versions-build-args.py", "jbsky/hardened-ci/versions@")
@@ -49,7 +52,7 @@ def key_to_arg(key):
     if key in SPECIAL_KEYS:
         return None
     name = re.sub(r"[-.]", "_", key).upper()
-    if name.endswith(("_SHA256", "_COMMIT")):
+    if name.endswith(("_SHA256", "_COMMIT", "_TAG")):
         return name
     return name + "_VERSION"
 
@@ -225,7 +228,7 @@ def check_workflow(text, label):
 # --------------------------------------------------------------------------
 #  Le controle
 # --------------------------------------------------------------------------
-ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*_(?:VERSION|VER|SHA256|COMMIT))\s*(?::=|\?=|=|:)\s*(\S+)")
+ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*_(?:VERSION|VER|SHA256|COMMIT|TAG))\s*(?::=|\?=|=|:)\s*(\S+)")
 
 
 def check(root="."):

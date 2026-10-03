@@ -130,6 +130,12 @@ class CheckTest(unittest.TestCase):
         self.repo.edit("Dockerfile", "    TCC_COMMIT\n", "    TCC_COMMIT=abc123\n")
         self.assertCaught("ARG TCC_COMMIT=abc123 -- valeur par defaut interdite")
 
+    def test_suffixe_tag_reconnu(self):
+        # Cas bind9 : ARG JSONC_TAG=json-c-0.19-20260627, version ecrite en dur.
+        self.repo.edit("Dockerfile", "ARG OISF_FPR", "ARG JSONC_TAG=json-c-0.19-20260627\nARG OISF_FPR")
+        self.assertCaught("ARG JSONC_TAG=json-c-0.19-20260627 -- valeur par defaut interdite")
+        self.assertCaught("ARG JSONC_TAG sans cle dans versions.json")
+
     def test_suffixe_ver_vide_reconnu(self):
         # Cas nginx : ARG NGINX_VER="" et resolution amont quand il est vide.
         self.repo.edit("Dockerfile", "ARG OISF_FPR", 'ARG NGINX_VER=""\nARG OISF_FPR')
@@ -249,6 +255,7 @@ class GenerateurTest(unittest.TestCase):
         self.assertEqual(vba.key_to_arg("suricata"), "SURICATA_VERSION")
         self.assertEqual(vba.key_to_arg("libhtp_sha256"), "LIBHTP_SHA256")
         self.assertEqual(vba.key_to_arg("tcc_commit"), "TCC_COMMIT")
+        self.assertEqual(vba.key_to_arg("json-c_tag"), "JSON_C_TAG")
         self.assertEqual(vba.key_to_arg("c-icap"), "C_ICAP_VERSION")
         self.assertEqual(vba.key_to_arg("uptime-kuma"), "UPTIME_KUMA_VERSION")
         self.assertIsNone(vba.key_to_arg("alpine"))
