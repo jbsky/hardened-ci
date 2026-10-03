@@ -55,6 +55,18 @@ build fails at the Dockerfile guard in under a second.
 `scripts/test_versions_build_args.py` holds one test per rule: each injects a
 single defect into a conforming repository and requires the matching error.
 
+### `template/` -- starting point of a new image repository
+
+`./scripts/new-image.sh ../<app>-hardened` copies `template/` and adds the
+shared scripts from `scripts/` (their reference copy; the template holds none
+that could drift). The template ships with the `versions` check wired in: lint
+job (`--check` + unit test), build job (`versions` action), Dockerfile without
+any default and with its guard, `make build` through the generator.
+
+CI instantiates it on every PR and proves it both ways: it passes the check,
+the check fails once a version is hard-coded, a build without build-args fails
+at the guard, and the built image carries the version from `versions.json`.
+
 ## Pinning policy
 
 Callers pin a **full commit SHA**, with the release tag as a comment, never a
