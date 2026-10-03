@@ -1,0 +1,14 @@
+name: build-push
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Versions
+        id: versions
+        uses: jbsky/hardened-ci/versions@0123456789abcdef0123456789abcdef01234567 # v0.1.0
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          build-args: ${{ steps.versions.outputs.build-args }}
