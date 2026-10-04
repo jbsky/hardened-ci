@@ -202,6 +202,13 @@ must be refused; `check-image-closure` on a complete and a broken
 (`libssl.so.3` missing) fixture image; `image-manifest --check` on an identical
 image and on the same image plus one file. ShellCheck on every script.
 
+`image-manifest.py --report -m image.manifest --name <image>` renders the
+manifest as Markdown (named paths, ELF files, modes, owners, capabilities,
+duplicates) for `$GITHUB_STEP_SUMMARY`: every build shows what it ships. It
+reads the manifest, never the image -- `--check` has just proved they match.
+Since v0.9.0 (from the closed `ci/inventaire-image` PRs); `--generate` output
+is byte-identical to v0.8.0 (checked on a published image).
+
 Locally, `image-manifest.py --generate` (regenerate a repository's manifest)
 runs from a checkout of this repository at the ref its workflow pins:
 `python3 ../hardened-ci/scripts/image-manifest.py --generate <image> -o image.manifest`.
