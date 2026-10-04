@@ -24,7 +24,7 @@ flowchart LR
     direction LR
     lint["lint<br/>hadolint, ShellCheck, gofmt/vet/test<br/>VENDORED.sha256<br/>versions --check"]
     build["build (amd64)<br/>versions -> build-args<br/>prep scanned (Trivy, SBOM)<br/>push by digest / PR: tarball"]
-    arm["build-arm64<br/>versions -> build-args<br/>QEMU, push by digest"]
+    arm["build-arm64<br/>native ubuntu-24.04-arm runner<br/>versions -> build-args, push by digest"]
     test["test<br/>pull the digest, healthy,<br/>version assert, manifest,<br/>closure, smoke tests"]
     rev["revision<br/>&lt;version&gt;.&lt;revision&gt;<br/>already published? skip"]
     promote["promote<br/>tags on the TESTED digest<br/>cosign sign, SBOM attest"]
@@ -69,7 +69,7 @@ flowchart LR
 
 On a pull request the image is built and tested from a tarball, never pushed:
 `build-arm64`, `revision`, `promote` and what follows are skipped (bind9 adds a
-`validate` job that builds both architectures on PRs). A `push` run re-tests the
+`validate` job that builds both architectures on PRs, each on its native runner). A `push` run re-tests the
 exact digest it will tag -- a gate green on the PR is not proof for the push.
 
 Building blocks land one at a time, each one first adopted by a single canary
