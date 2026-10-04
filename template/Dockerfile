@@ -21,5 +21,13 @@ RUN test -n "${APP_VERSION}" \
 # que la version de versions.json arrive jusqu'a l'image.
 RUN mkdir -p /out && printf '%s\n' "${APP_VERSION}" > /out/VERSION
 
+# Stage prep : les paquets runtime qui finiront dans l'image (aucun ici). Le
+# gabarit build-push le construit a part et le scanne (Trivy, SBOM attestee) :
+# c'est le seul stage encore lisible par un scanner.
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS prep
+
 FROM scratch
 COPY --from=builder /out/VERSION /VERSION
+# Une image sans commande ne se cree pas (docker create), ce que font
+# image-manifest.py et check-image-closure.sh : une vraie image a son init.
+CMD ["/VERSION"]

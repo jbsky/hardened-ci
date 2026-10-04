@@ -1,0 +1,874 @@
+# =====================================================================
+#  build-push -- gabarit commun du pipeline des images durcies (etape 4).
+#
+#  Le depot appelant garde ses declencheurs (on: et paths:) et decrit ce qui
+#  le distingue dans UN fichier, .github/hardened-ci.json (scripts/hci-config.py) :
+#  nom d'image, lecture de la version, entrees du compteur de revision,
+#  plateformes, service compose, sondes de version, tests fonctionnels.
+#
+#  Chaine : lint -> build amd64 (prep scanne, SBOM) -> test sur le digest
+#  EXACT qui sera publie -> build arm64 (runner natif) -> garde de revision
+#  (un tag <version>.<revision> publie n'est jamais repromu) -> promote (tags
+#  sur le digest teste, cosign, SBOM atteste, SLSA) -> README -> purge des
+#  vieux tags -> release (tags v*) -> issue si echec.
+#
+#  Les actions et scripts de hardened-ci viennent d'un checkout de ce depot a
+#  job.workflow_sha : le SHA exact de CE workflow (github.sha est celui de
+#  l'appelant). Aucune ref a passer, aucune copie.
+#
+#  Signature : le certificat cosign porte l'identite de CE workflow
+#  (jbsky/hardened-ci/.github/workflows/build-push.yml@...) et, en extension,
+#  le depot appelant. Les verificateurs exigent les deux : identite (appelant
+#  OU hardened-ci) ET --certificate-github-workflow-repository = l'appelant.
+#
+#  Appel (le job appelant accorde les permissions, passe les secrets) :
+#
+#    jobs:
+#      pipeline:
+#        uses: jbsky/hardened-ci/.github/workflows/build-push.yml@<sha> # vX.Y.Z
+#        permissions: {contents: write, packages: write, id-token: write,
+#                      attestations: write, security-events: write, issues: write}
+#        secrets:
+#          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+#          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+# =====================================================================
+name: build-push
+
+on:
+  workflow_call:
+    inputs:
+      workdir:
+        description: Repertoire du depot d'image dans le checkout (tests de hardened-ci seulement)
+        type: string
+        default: .
+      publish:
+        description: "'false' force le mode PR (build + test, rien de pousse) meme hors pull_request"
+        type: boolean
+        default: true
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: ${{ github.repository_owner }}
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------
+  #  Lecture unique du fichier de description du depot.
+  # -------------------------------------------------------------------
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.c.outputs.image }}
+      arm64: ${{ steps.c.outputs.arm64 }}
+      compose: ${{ steps.c.outputs.compose }}
+      validate: ${{ steps.c.outputs.validate }}
+      version: ${{ steps.c.outputs.version }}
+      publish: ${{ steps.c.outputs.publish }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Lire .github/hardened-ci.json
+        id: c
+        env:
+          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+          PUBLISH_INPUT: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          "$HCI" --check
+          {
+            echo "image=$("$HCI" get image)"
+            echo "arm64=$("$HCI" get platforms | jq -r 'index("linux/arm64") != null')"
+            echo "compose=$("$HCI" get compose_service | sed 's/^null$//')"
+            echo "validate=$("$HCI" get validate_on_pr)"
+            echo "version=$("$HCI" version)"
+            if [ "$GITHUB_EVENT_NAME" != pull_request ] && [ "$PUBLISH_INPUT" = true ]; then
+              echo "publish=true"
+            else
+              echo "publish=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  lint:
+    name: Lint
+    needs: config
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+
+      - name: versions.json, seule source des versions du build
+        uses: ./.hardened-ci/versions
+        with:
+          path: ${{ inputs.workdir }}
+
+      # Une copie locale du controle (celle de `make build`) doit valoir celle
+      # de hardened-ci a cette ref : sinon les deux derivent en silence.
+      - name: Copie locale du controle = hardened-ci
+        run: |
+          set -euo pipefail
+          for f in versions-build-args.py test_versions_build_args.py; do
+            [ -f "scripts/$f" ] || continue
+            cmp "scripts/$f" "$GITHUB_WORKSPACE/.hardened-ci/scripts/$f" \
+              || { echo "::error::scripts/$f differe de jbsky/hardened-ci@${{ job.workflow_sha }}"; exit 1; }
+          done
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.4.0
+        with:
+          dockerfile: ${{ inputs.workdir }}/Dockerfile
+          failure-threshold: warning
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          find . -path ./.hardened-ci -prune -o -path ./.git -prune -o -name '*.sh' -print0 \
+            | xargs -0 -r shellcheck
+
+      - uses: actions/setup-go@v7
+        if: hashFiles(format('{0}/go.mod', inputs.workdir)) != ''
+        with:
+          go-version-file: ${{ inputs.workdir }}/go.mod
+
+      - name: gofmt, go vet, go test
+        if: hashFiles(format('{0}/go.mod', inputs.workdir)) != ''
+        run: |
+          set -euo pipefail
+          fmt_out=$(gofmt -l .)
+          [ -z "$fmt_out" ] || { echo "::error::gofmt : fichiers non formates :"; echo "$fmt_out"; exit 1; }
+          go vet ./...
+          go test ./...
+
+  # -------------------------------------------------------------------
+  #  amd64, une seule fois. Hors PR : pousse PAR DIGEST, que `test` retire
+  #  et que `promote` etiquette -- l'octet teste est l'octet publie. En PR :
+  #  tarball passe a `test`, rien n'est pousse.
+  # -------------------------------------------------------------------
+  build:
+    name: Build image
+    needs: [config, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      PUBLISH: ${{ needs.config.outputs.publish }}
+      IMAGE_NAME: ${{ needs.config.outputs.image }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+
+      - name: Build-args depuis versions.json
+        id: build-args
+        uses: ./.hardened-ci/versions
+        with:
+          path: ${{ inputs.workdir }}
+
+      - name: Tag local attendu par les tests
+        id: local
+        env:
+          COMPOSE: ${{ needs.config.outputs.compose }}
+        run: |
+          if [ -n "$COMPOSE" ]; then
+            echo "tag=$(docker compose config --images "$COMPOSE")" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${IMAGE_NAME}:test" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Login ghcr.io
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Make room for local tarball export (PR only)
+        if: env.PUBLISH != 'true'
+        run: mkdir -p /tmp/image-tar
+
+      - name: Build (push-by-digest, or local tarball on PR)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.workdir }}
+          build-args: ${{ steps.build-args.outputs.build-args }}
+          platforms: linux/amd64
+          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0}/{1}/{2},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.NAMESPACE, env.IMAGE_NAME) || 'type=docker,dest=/tmp/image-tar/image.tar' }}
+          tags: ${{ env.PUBLISH != 'true' && steps.local.outputs.tag || '' }}
+          sbom: ${{ env.PUBLISH }}
+          provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-amd64
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-amd64
+          # Le stage prep porte les paquets qui finissent dans l'image : jamais
+          # du cache, sinon manifeste et scan CVE examinent des paquets perimes.
+          no-cache-filters: prep
+
+      # Le seul stage encore lisible par un scanner : les paquets runtime copies
+      # dans l'image FROM scratch. SARIF large (CRITICAL+HIGH), echec etroit
+      # (CRITICAL corrigeables seulement).
+      - name: Build prep stage (Alpine with runtime deps)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.workdir }}
+          build-args: ${{ steps.build-args.outputs.build-args }}
+          target: prep
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE_NAME }}-prep:scan
+          no-cache-filters: prep
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-amd64
+
+      - name: Trivy scan prep stage (report CRITICAL+HIGH)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}-prep:scan
+          format: sarif
+          output: trivy-prep.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          ignore-unfixed: true
+
+      - name: Upload prep SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-prep.sarif
+          category: ${{ env.IMAGE_NAME }}-deps
+
+      - name: SBOM of prep stage (CycloneDX)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}-prep:scan
+          format: cyclonedx
+          output: sbom-prep.cdx.json
+
+      - name: Upload prep SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-prep
+          path: sbom-prep.cdx.json
+          if-no-files-found: error
+
+      - name: Trivy gate prep stage (fail on fixable CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}-prep:scan
+          format: table
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload image tarball (PR only, for the test job)
+        if: env.PUBLISH != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-tar
+          path: /tmp/image-tar/image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------
+  test:
+    name: Functional tests
+    needs: [config, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      PUBLISH: ${{ needs.config.outputs.publish }}
+      IMAGE_NAME: ${{ needs.config.outputs.image }}
+      COMPOSE: ${{ needs.config.outputs.compose }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+
+      - name: Tag local attendu par les tests
+        id: local
+        run: |
+          if [ -n "$COMPOSE" ]; then
+            echo "tag=$(docker compose config --images "$COMPOSE")" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${IMAGE_NAME}:test" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login ghcr.io
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull built digest for testing
+        if: env.PUBLISH == 'true'
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}
+          LOCAL: ${{ steps.local.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker pull "$REF"
+          docker tag "$REF" "$LOCAL"
+
+      - name: Download image tarball (PR only)
+        if: env.PUBLISH != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: image-tar
+          path: /tmp/image-tar
+
+      - name: Load image tarball (PR only)
+        if: env.PUBLISH != 'true'
+        run: docker load -i /tmp/image-tar/image.tar
+
+      - name: Start stack
+        if: env.COMPOSE != ''
+        run: docker compose up -d --no-build "$COMPOSE"
+
+      # Prouve l'instruction HEALTHCHECK de l'image, pas seulement le binaire.
+      - name: Wait for healthy
+        if: env.COMPOSE != ''
+        run: |
+          set -euo pipefail
+          cid=$(docker compose ps -q "$COMPOSE")
+          for _ in $(seq 1 60); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)
+            [ "$status" = healthy ] && exit 0
+            sleep 2
+          done
+          echo "::error::$COMPOSE n'est pas devenu healthy"
+          docker inspect --format '{{json .State.Health}}' "$cid" || true
+          exit 1
+
+      # Le tag publie doit nommer ce que l'image contient : php a publie 8.5.8
+      # sous un tag 8.5.9 pendant 18 jours. Chaque sonde interroge l'image.
+      - name: Assert the image is the version we tag it with
+        env:
+          IMAGE: ${{ steps.local.outputs.tag }}
+          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+        run: |
+          set -uo pipefail
+          n=$("$HCI" get probes | jq length)
+          rc=0
+          for i in $(seq 0 $((n - 1))); do
+            p=$("$HCI" get probes | jq -c ".[$i]")
+            label=$(jq -r .label <<<"$p")
+            want=$("$HCI" want "$(jq -r '.want // "version"' <<<"$p")")
+            raw=$(IMAGE="$IMAGE" bash -c "$(jq -r .cmd <<<"$p")" 2>&1 || true)
+            regex=$(jq -r '.regex // empty' <<<"$p")
+            got=$(printf '%s' "$raw" | grep -oP "$regex" | head -1 || true)
+            echo "$label declared: ${want} | image: ${got:-<illisible>}"
+            if [ "$want" != "$got" ]; then
+              echo "::error::l'image embarque $label ${got:-<illisible>} mais serait publiee comme ${want}"
+              printf 'sortie de la sonde :\n%s\n' "$raw" | head -5
+              rc=1
+            fi
+          done
+          exit $rc
+
+      # Le manifeste dit ce qui est DANS l'image (chemins, modes, uid/gid,
+      # capabilities, doublons) : toute derive echoue ici, a regenerer dans le
+      # meme commit si elle est voulue.
+      - name: Image manifest
+        env:
+          IMAGE: ${{ steps.local.outputs.tag }}
+        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/image-manifest.py" --check "$IMAGE" -m image.manifest'
+
+      - name: Image inventory (job summary)
+        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/image-manifest.py" --report -m image.manifest --name "$IMAGE_NAME" >> "$GITHUB_STEP_SUMMARY"'
+
+      # Le vrai chargeur musl, dans un chroot sur le filesystem de l'image,
+      # resout chaque ELF embarque (lddtree sort en 0 sur une lib manquante).
+      - name: Image closure
+        env:
+          IMAGE: ${{ steps.local.outputs.tag }}
+        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/check-image-closure.sh" "$IMAGE"'
+
+      - name: Run smoke tests
+        env:
+          IMAGE: ${{ steps.local.outputs.tag }}
+          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+        run: |
+          set -euo pipefail
+          smoke=$("$HCI" get smoke)
+          if [ "$smoke" = None ] || [ -z "$smoke" ] || [ "$smoke" = null ]; then
+            echo "pas de tests fonctionnels declares (smoke)"; exit 0
+          fi
+          IMAGE="$IMAGE" bash -c "$smoke"
+
+      - name: Container logs (on failure)
+        if: failure() && env.COMPOSE != ''
+        run: docker compose logs
+
+      - name: Teardown
+        if: always() && env.COMPOSE != ''
+        run: docker compose down -v
+
+  # -------------------------------------------------------------------
+  #  arm64 sur runner NATIF (ubuntu-24.04-arm, gratuit en public) : sous QEMU
+  #  un rebuild complet prenait 27 min (php) a 1 h 40 (bind9).
+  # -------------------------------------------------------------------
+  build-arm64:
+    name: Build arm64
+    needs: [config, lint]
+    if: needs.config.outputs.arm64 == 'true' && needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      IMAGE_NAME: ${{ needs.config.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Build-args depuis versions.json
+        id: build-args
+        uses: ./.hardened-ci/versions
+        with:
+          path: ${{ inputs.workdir }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Login ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & Push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.workdir }}
+          build-args: ${{ steps.build-args.outputs.build-args }}
+          platforms: linux/arm64
+          sbom: true
+          provenance: mode=max
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-arm64
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-arm64
+          no-cache-filters: prep
+
+  # -------------------------------------------------------------------
+  #  PR : chaque architecture construite sur son runner natif, sans pousser.
+  # -------------------------------------------------------------------
+  validate:
+    name: Validate build (PR, ${{ matrix.platform }})
+    needs: [config, lint]
+    if: needs.config.outputs.validate == 'true' && needs.config.outputs.publish != 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Build-args depuis versions.json
+        id: build-args
+        uses: ./.hardened-ci/versions
+        with:
+          path: ${{ inputs.workdir }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Build (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.workdir }}
+          build-args: ${{ steps.build-args.outputs.build-args }}
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ needs.config.outputs.image }}-validate-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ needs.config.outputs.image }}-validate-${{ matrix.platform }}
+
+  # -------------------------------------------------------------------
+  #  Un tag <version>.<revision> est immuable : le routeur l'epingle. Deja
+  #  present -> pas de promotion, run vert. Toute autre reponse du registre
+  #  que 200/404 fait echouer : ne jamais reecrire par defaut.
+  # -------------------------------------------------------------------
+  revision:
+    name: Immutable tag guard
+    needs: config
+    if: needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.revision.outputs.tag }}
+      published: ${{ steps.published.outputs.published }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      # fetch-depth 0 : le compteur compte des commits ; build-revision.sh
+      # refuse de lui-meme un clone superficiel.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Compute build revision
+        id: revision
+        run: echo "tag=$("$GITHUB_WORKSPACE/.hardened-ci/scripts/hci-config.py" tag)" >> "$GITHUB_OUTPUT"
+      - name: Is this tag already published?
+        id: published
+        env:
+          REPO: ${{ env.NAMESPACE }}/${{ needs.config.outputs.image }}
+          TAG: ${{ steps.revision.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -fsS "https://${REGISTRY}/token?scope=repository:${REPO}:pull" | jq -r .token)
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://${REGISTRY}/v2/${REPO}/manifests/${TAG}")
+          case "$CODE" in
+            200) PUBLISHED=true
+                 echo "- \`${TAG}\` est deja publie : pas de promotion (aucun input de l'image n'a change)" >> "$GITHUB_STEP_SUMMARY" ;;
+            404) PUBLISHED=false
+                 echo "- \`${TAG}\` : nouvelle revision, promotion" >> "$GITHUB_STEP_SUMMARY" ;;
+            *)   echo "::error::${REGISTRY} a repondu ${CODE} pour ${REPO}:${TAG}"; exit 1 ;;
+          esac
+          echo "published=${PUBLISHED}" >> "$GITHUB_OUTPUT"
+
+  # -------------------------------------------------------------------
+  promote:
+    name: Promote tested digests
+    needs: [config, build, test, build-arm64, revision]
+    if: >-
+      always() && needs.config.outputs.publish == 'true'
+      && needs.build.result == 'success' && needs.test.result == 'success'
+      && needs.revision.result == 'success' && needs.revision.outputs.published == 'false'
+      && (needs.build-arm64.result == 'success' || needs.build-arm64.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+    env:
+      IMAGE_NAME: ${{ needs.config.outputs.image }}
+      VERSION: ${{ needs.config.outputs.version }}
+      TAG: ${{ needs.revision.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Login ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "image=docker.io/${DOCKERHUB_USERNAME}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Login Docker Hub
+        if: steps.dockerhub.outputs.available == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
+            ${{ steps.dockerhub.outputs.image }}
+          tags: |
+            type=raw,value=${{ env.TAG }}
+            type=semver,pattern={{version}}
+            type=raw,value=${{ env.VERSION }}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Create tags on the tested digests (no rebuild)
+        id: manifest
+        env:
+          AMD64: ${{ needs.build.outputs.digest }}
+          ARM64: ${{ needs.build-arm64.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}"
+          args=()
+          while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
+          srcs=("${IMAGE}@${AMD64}")
+          [ -n "$ARM64" ] && srcs+=("${IMAGE}@${ARM64}")
+          docker buildx imagetools create "${args[@]}" "${srcs[@]}"
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image (OIDC keyless)
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+          HAS_DOCKERHUB: ${{ steps.dockerhub.outputs.available }}
+          HUB: ${{ steps.dockerhub.outputs.image }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
+          if [ "$HAS_DOCKERHUB" = true ]; then
+            COSIGN_REPOSITORY="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}" cosign sign --yes "${HUB}@${DIGEST}"
+          fi
+      - name: Download prep SBOM
+        uses: actions/download-artifact@v8
+        with:
+          name: sbom-prep
+      # La SBOM du stage prep, attestee sur chaque digest publie : seule base
+      # d'un audit CVE d'une image FROM scratch (cve-watch la relit chaque jour).
+      - name: Attest prep SBOM (CycloneDX)
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: cosign attest --yes --type cyclonedx --predicate sbom-prep.cdx.json "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          ignore-unfixed: true
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+          category: ${{ env.IMAGE_NAME }}
+      - name: GitHub SLSA Attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          {
+            echo "### ${IMAGE_NAME} ${TAG}"
+            echo "**Digest:** \`${DIGEST}\`"
+            echo '```'
+            echo "docker pull ${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${TAG}"
+            echo "cosign verify ${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}:${TAG} \\"
+            echo "  --certificate-identity-regexp '^https://github.com/(${GITHUB_REPOSITORY}|jbsky/hardened-ci)/' \\"
+            echo "  --certificate-github-workflow-repository ${GITHUB_REPOSITORY} \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # -------------------------------------------------------------------
+  update-readme:
+    name: Refresh README tag block
+    needs: [config, promote, revision]
+    # Pas pour un depot temoin (workdir != .) : son README n'a pas de bloc de tags.
+    if: needs.promote.result == 'success' && inputs.workdir == '.' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Rewrite tag block
+        env:
+          SPEC: jbsky/${{ needs.config.outputs.image }}=${{ needs.config.outputs.version }}=${{ needs.revision.outputs.tag }}
+        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/update-readme-tags.sh" "$SPEC"'
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet README.md; then echo "README already names the current tag"; exit 0; fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs(readme): tag immuable courant [skip ci]"
+          for _ in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin "${{ github.event.repository.default_branch }}" || true
+          done
+          exit 1
+
+  # -------------------------------------------------------------------
+  #  Garde les 6 derniers tags immuables (+ :latest) ; scripts prune-* de
+  #  hardened-ci a la ref de ce workflow.
+  # -------------------------------------------------------------------
+  cleanup:
+    name: Prune old registry tags
+    needs: [config, promote]
+    if: needs.promote.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.config.outputs.image }}
+      KEEP: '6'
+    steps:
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Prune old Docker Hub tags
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -z "$DOCKERHUB_TOKEN" ]; then echo "pas d'identifiants Docker Hub : saute"; exit 0; fi
+          ./.hardened-ci/scripts/prune-registry-tags.sh "$DOCKERHUB_USERNAME" "$IMAGE" "$KEEP"
+      - name: Prune old GHCR tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./.hardened-ci/scripts/prune-ghcr-tags.sh "${{ github.repository_owner }}" "$IMAGE" "$KEEP"
+
+  # -------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs: [config, revision, promote]
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/v')
+      && needs.revision.result == 'success'
+      && (needs.promote.result == 'success' || needs.revision.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      IMAGE_NAME: ${{ needs.config.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Archive + checksums (fichiers suivis seulement)
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME}"; N="${IMAGE_NAME}-${V}"
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="${N}/" -o "dist/${N}.tar.gz" HEAD
+          cd dist
+          sha256sum "${N}.tar.gz" > "${N}.sha256"
+          sha512sum "${N}.tar.gz" > "${N}.sha512"
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: |
+            dist/${{ env.IMAGE_NAME }}-${{ github.ref_name }}.tar.gz
+            dist/${{ env.IMAGE_NAME }}-${{ github.ref_name }}.sha256
+            dist/${{ env.IMAGE_NAME }}-${{ github.ref_name }}.sha512
+
+  # -------------------------------------------------------------------
+  notify:
+    name: Issue si echec
+    needs: [config, lint, build, test, build-arm64, revision, promote, update-readme, cleanup, release]
+    if: always() && needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.NEEDS);
+            const rouges = Object.entries(needs)
+              .filter(([, j]) => j.result === 'failure' || j.result === 'cancelled')
+              .map(([nom]) => nom);
+            const branche = context.ref.replace(/^refs\/(heads|tags)\//, '');
+            const titre = `[CI] build-push en echec sur ${branche}`;
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: ouvertes } = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: 'ci-failure', per_page: 100 });
+            const issue = ouvertes.find(i => i.title === titre);
+            if (rouges.length) {
+              const corps = `Run \`${context.eventName}\` sur ${context.sha.slice(0, 7)} en echec `
+                + `(${rouges.join(', ')}) : ${run}\n\ncc @${context.repo.owner}`;
+              if (issue) {
+                await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body: corps });
+              } else {
+                await github.rest.issues.create({ ...context.repo, title: titre, body: corps,
+                  labels: ['ci-failure', 'automated'] });
+              }
+            } else if (issue) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number,
+                body: `Repasse au vert : ${run}` });
+              await github.rest.issues.update({ ...context.repo, issue_number: issue.number, state: 'closed' });
+            }

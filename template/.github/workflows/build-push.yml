@@ -1,21 +1,22 @@
 # =====================================================================
-#  build-push -- gabarit. Le controle « versions.json, seule source »
-#  tourne deux fois : au lint (avec son test unitaire, sur la copie locale
-#  du script, celle qu'utilise `make build`) et dans l'action versions du
-#  job build (a la ref epinglee de hardened-ci), qui fournit les build-args.
-#  Chaque docker/build-push-action ajoutee plus tard (stage prep, arm64...)
-#  doit recevoir `build-args: ${{ steps.versions.outputs.build-args }}` :
-#  le controle echoue sinon.
+#  build-push -- tout le pipeline vient du gabarit de jbsky/hardened-ci.
+#  Ce depot ne decrit que ce qui le distingue : .github/hardened-ci.json
+#  (image, version, entrees du compteur de revision, plateformes, sondes,
+#  tests). Le filtre paths: doit couvrir les entrees du compteur : le
+#  gabarit le controle (hci-config.py --check).
 # =====================================================================
 name: build-push
 
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
     paths:
       - 'Dockerfile'
       - 'versions.json'
+      - 'image.manifest'
       - 'scripts/**'
+      - '.github/hardened-ci.json'
       - '.github/workflows/build-push.yml'
   pull_request:
     branches: [main]
@@ -25,33 +26,15 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Versions -- source unique
-        run: |
-          python3 -m unittest discover -s scripts -p 'test_versions_build_args.py' -v
-          ./scripts/versions-build-args.py --check
-
-  build:
-    name: Build image
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Versions (controle + build-args)
-        id: versions
-        uses: jbsky/hardened-ci/versions@f043d918006d342e328764f625c424abbcceab64 # v0.1.0
-
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: false
-          build-args: ${{ steps.versions.outputs.build-args }}
+  pipeline:
+    uses: jbsky/hardened-ci/.github/workflows/build-push.yml@HCI_SHA # HCI_TAG
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+      issues: write
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
