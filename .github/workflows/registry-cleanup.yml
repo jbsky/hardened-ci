@@ -31,9 +31,11 @@
 #  either -- it deletes tags; it is linted, and proved on a canary by
 #  comparing tag lists before/after.
 #
-#  Step 1 of the shared-CI plan: the prune scripts are still the caller's
-#  vendored copies (`./scripts/prune-*.sh`, checked out from the caller);
-#  they move into a composite action at step 2.
+#  The prune scripts are this repository's (scripts/prune-*.sh), checked out
+#  at the exact ref of THIS workflow: `job.workflow_sha` is the called
+#  workflow's SHA (github.sha is the caller's). Probed on 2026-10-04; needs
+#  only contents: read, no OIDC token. Until step 2 they were the caller's
+#  vendored copies.
 # =====================================================================
 name: registry-cleanup
 
@@ -73,8 +75,12 @@ jobs:
       matrix:
         image: ${{ fromJSON(inputs.images) }}
     steps:
-      # Checks out the CALLER: its vendored prune scripts (step 1).
-      - uses: actions/checkout@v7
+      - name: hardened-ci scripts at the ref of this workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
 
       - name: Check Docker Hub credentials
         id: dockerhub
@@ -94,7 +100,7 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           IMAGE: ${{ matrix.image }}
           KEEP: ${{ inputs.keep-count }}
-        run: ./scripts/prune-registry-tags.sh "$DOCKERHUB_USERNAME" "$IMAGE" "$KEEP"
+        run: ./.hardened-ci/scripts/prune-registry-tags.sh "$DOCKERHUB_USERNAME" "$IMAGE" "$KEEP"
 
       - name: Prune old GHCR tags
         env:
@@ -102,4 +108,4 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           IMAGE: ${{ matrix.image }}
           KEEP: ${{ inputs.keep-count }}
-        run: ./scripts/prune-ghcr-tags.sh "$OWNER" "$IMAGE" "$KEEP"
+        run: ./.hardened-ci/scripts/prune-ghcr-tags.sh "$OWNER" "$IMAGE" "$KEEP"

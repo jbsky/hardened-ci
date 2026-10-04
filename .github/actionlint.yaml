@@ -1,0 +1,9 @@
+# actionlint (1.7.12, la derniere) ne connait pas encore le contexte
+# `job.workflow_sha`, que GitHub fournit pourtant : sonde du 2026-10-04 --
+# dans un workflow appele, job.workflow_sha = SHA du workflow APPELE,
+# github.sha = celui de l'appelant. Exemption etroite : ce seul message, ce
+# seul fichier. A retirer quand actionlint connaitra la propriete.
+paths:
+  .github/workflows/registry-cleanup.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'

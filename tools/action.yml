@@ -1,0 +1,36 @@
+# =====================================================================
+#  tools -- les scripts partages des depots d'images durcies, a la ref
+#  epinglee par l'appelant (github.action_path), sans aucune copie locale.
+#
+#  Sortie `dir` : chemin absolu du repertoire scripts/ de hardened-ci a
+#  cette ref. L'appelant garde ses lignes de commande telles quelles et ne
+#  change que le chemin :
+#
+#      - id: hci
+#        uses: jbsky/hardened-ci/tools@<sha> # vX.Y.Z
+#      - run: '"${{ steps.hci.outputs.dir }}/build-revision.sh" bind Dockerfile ...'
+#
+#  Scripts : build-revision.sh, check-image-closure.sh, image-manifest.py,
+#  prune-ghcr-tags.sh, prune-registry-tags.sh, update-readme-tags.sh
+#  (plus versions-build-args.py, que l'action versions/ enveloppe deja).
+# =====================================================================
+name: tools
+description: Chemin des scripts partages de hardened-ci, a la ref epinglee
+outputs:
+  dir:
+    description: Chemin absolu du repertoire scripts/ de hardened-ci
+    value: ${{ steps.dir.outputs.dir }}
+runs:
+  using: composite
+  steps:
+    - name: Scripts partages de hardened-ci
+      id: dir
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir=$(cd "$GITHUB_ACTION_PATH/../scripts" && pwd)
+        for f in build-revision.sh check-image-closure.sh image-manifest.py \
+                 prune-ghcr-tags.sh prune-registry-tags.sh update-readme-tags.sh; do
+          [ -x "$dir/$f" ] || { echo "::error::$f absent ou non executable dans $dir"; exit 1; }
+        done
+        echo "dir=$dir" >> "$GITHUB_OUTPUT"

@@ -184,3 +184,34 @@ jobs:
           echo "vulnerable: ${n_vuln} x CVE-2026-14456 | propre: ${n_clean}"
           [ "$n_vuln" -ge 1 ] || { echo "::error::la SBOM vulnerable n'a pas remonte CVE-2026-14456"; exit 1; }
           [ "$n_clean" -eq 0 ] || { echo "::error::la SBOM propre a remonte ${n_clean} CVE"; exit 1; }
+
+  # Les six scripts partages (etape 2) : chacun eprouve dans les deux sens.
+  # build-revision sur un historique git connu (les trois formes d'appel des
+  # depots + clone superficiel refuse) ; cloture et manifeste sur des images
+  # temoins minuscules (complete / trouee, identique / un fichier de plus).
+  scripts:
+    name: Scripts partages (revision, cloture, manifeste, tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh tests/scripts/*.sh
+
+      - name: build-revision -- comptes attendus sur un historique connu
+        run: ./tests/scripts/build-revision.sh
+
+      - name: check-image-closure et image-manifest -- dans les deux sens
+        run: ./tests/scripts/image-checks.sh
+
+      - name: Action tools
+        id: hci
+        uses: ./tools
+
+      - name: tools donne le repertoire des scripts de cette ref
+        env:
+          DIR: ${{ steps.hci.outputs.dir }}
+        run: |
+          set -euo pipefail
+          test "$DIR" = "$(cd scripts && pwd)"
+          "$DIR/build-revision.sh" 2>&1 | grep -q usage

@@ -61,8 +61,8 @@ flowchart LR
 |---|---|---|
 | `versions` check + build-args (in lint, build, build-arm64) | **hardened-ci** action `versions/` | v0.1.0 -> v0.7.0, on all 7 |
 | `cve-watch` | **hardened-ci** reusable workflow | v0.3.0, step 1 |
-| `registry-cleanup` (cleanup job) | **hardened-ci** reusable workflow, runs the caller's `prune-*` | v0.3.0, step 1 |
-| 6 vendored scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | each repository + `VENDORED.sha256` | step 2: composite actions |
+| `registry-cleanup` (cleanup job) | **hardened-ci** reusable workflow, runs ITS OWN `prune-*` (checkout at `job.workflow_sha`) | v0.3.0 step 1; own scripts since v0.8.0 |
+| 6 shared scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | **hardened-ci** `scripts/`, reached through the `tools/` action | v0.8.0, step 2 (repositories migrate off their vendored copies) |
 | `security-audit` | each repository | step 3 |
 | `build-push` jobs (lint ... notify) | each repository | step 4, after the signing identity move (cve-watch already accepts both identities) |
 | `version-watch` | each repository | stays local (logic is per upstream) |
@@ -174,8 +174,37 @@ cleanup:
 ```
 
 Not exercised by `test.yml` (it deletes tags): linted here, proved on a canary
-by comparing tag lists before and after. Until step 2 it runs the caller's
-vendored `scripts/prune-*.sh`.
+by comparing tag lists before and after. Since v0.8.0 it runs this
+repository's `scripts/prune-*.sh`, checked out at `job.workflow_sha` -- the
+SHA of the called workflow itself (github.sha would be the caller's); only
+`contents: read` is needed. actionlint does not know that context yet:
+`.github/actionlint.yaml` exempts that one message for that one file.
+
+### `tools` -- the shared scripts, at the pinned ref
+
+The six scripts every image repository used to vendor (`build-revision.sh`,
+`check-image-closure.sh`, `image-manifest.py`, `prune-ghcr-tags.sh`,
+`prune-registry-tags.sh`, `update-readme-tags.sh`) live in `scripts/`, byte for
+byte what the repositories carried. The action only returns their directory at
+the ref the caller pinned, so a caller keeps its command lines and changes the
+path:
+
+```yaml
+- id: hci
+  uses: jbsky/hardened-ci/tools@<sha> # vX.Y.Z
+- run: |
+    REVISION=$("${{ steps.hci.outputs.dir }}/build-revision.sh" bind Dockerfile init.go go.mod versions.json)
+```
+
+Tested both ways in `test.yml` (job `scripts`): `build-revision` on a git
+history with known counts for the three call forms, plus a shallow clone that
+must be refused; `check-image-closure` on a complete and a broken
+(`libssl.so.3` missing) fixture image; `image-manifest --check` on an identical
+image and on the same image plus one file. ShellCheck on every script.
+
+Locally, `image-manifest.py --generate` (regenerate a repository's manifest)
+runs from a checkout of this repository at the ref its workflow pins:
+`python3 ../hardened-ci/scripts/image-manifest.py --generate <image> -o image.manifest`.
 
 ### `template/` -- starting point of a new image repository
 
