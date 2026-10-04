@@ -26,6 +26,8 @@ RUN mkdir -p /out && printf '%s\n' "${APP_VERSION}" > /out/VERSION
 # c'est le seul stage encore lisible par un scanner.
 FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS prep
 
+# Image finale : FROM scratch, rien d'autre que ce que le service exige ; sa
+# cloture de dependances est verifiee a chaque build (check-image-closure.sh).
 FROM scratch
 COPY --from=builder /out/VERSION /VERSION
 # Une image sans commande ne se cree pas (docker create), ce que font
