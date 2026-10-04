@@ -214,4 +214,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$DIR" = "$(cd scripts && pwd)"
-          "$DIR/build-revision.sh" 2>&1 | grep -q usage
+          # Sans argument, le script sort en erreur avec son usage : on veut
+          # l'usage, pas le code de sortie (pipefail ferait echouer le tube).
+          out=$("$DIR/build-revision.sh" 2>&1 || true)
+          grep -q usage <<<"$out"
