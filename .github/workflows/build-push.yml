@@ -739,7 +739,7 @@ jobs:
     name: Refresh README tag block
     needs: [config, promote, revision]
     # Pas pour un depot temoin (workdir != .) : son README n'a pas de bloc de tags.
-    if: needs.promote.result == 'success' && inputs.workdir == '.' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: always() && needs.promote.result == 'success' && inputs.workdir == '.' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -781,7 +781,9 @@ jobs:
   cleanup:
     name: Prune old registry tags
     needs: [config, promote]
-    if: needs.promote.result == 'success'
+    # always() : sans lui, un ancetre saute (build-arm64 sur une image amd64
+    # seule) fait sauter ce job aussi, en vert -- vu sur l'image temoin.
+    if: always() && needs.promote.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
