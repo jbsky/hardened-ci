@@ -28,5 +28,12 @@ if "$S/image-manifest.py" --check hci-closure-plus -m "$T/m" >"$T/m2" 2>&1; then
 elif grep -q 'etc/extra' "$T/m2"; then ok "fichier ajoute detecte (etc/extra nomme)"
 else ko "derive refusee sans nommer etc/extra"; cat "$T/m2"; fi
 
+# --- rapport (--report) : lu sur le manifeste, jamais sur l'image ---
+if "$S/image-manifest.py" --report -m "$T/m" --name hci-closure-ok >"$T/r" 2>&1 \
+   && grep -q 'hci-closure-ok' "$T/r" && grep -q 'bin/busybox' "$T/r" && grep -q -i 'elf' "$T/r"; then
+  ok "rapport Markdown : nom, fichier ELF et busybox presents"
+else ko "rapport incomplet"; cat "$T/r"; fi
+if "$S/image-manifest.py" --report -m "$T/absent" >"$T/r2" 2>&1; then ko "rapport sur un manifeste absent accepte"; else ok "rapport sur un manifeste absent refuse"; fi
+
 docker rmi -f hci-closure-ok hci-closure-ko hci-closure-plus >/dev/null 2>&1 || true
 exit $fail
