@@ -231,8 +231,11 @@ jobs:
     with:
       workdir: template
       publish: false
+    # Le gabarit declare des jobs en contents: write (README, release) : un
+    # workflow appele ne peut pas demander plus que l'appelant n'accorde, sinon
+    # GitHub refuse de demarrer tout le workflow (startup_failure).
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
       attestations: write
