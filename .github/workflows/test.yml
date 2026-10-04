@@ -201,6 +201,9 @@ jobs:
       - name: build-revision -- comptes attendus sur un historique connu
         run: ./tests/scripts/build-revision.sh
 
+      - name: hci-config -- conforme / COPY hors compteur / paths / sonde
+        run: ./tests/scripts/hci-config.sh
+
       - name: check-image-closure et image-manifest -- dans les deux sens
         run: ./tests/scripts/image-checks.sh
 
@@ -218,3 +221,24 @@ jobs:
           # l'usage, pas le code de sortie (pipefail ferait echouer le tube).
           out=$("$DIR/build-revision.sh" 2>&1 || true)
           grep -q usage <<<"$out"
+
+  # Le gabarit build-push complet, en mode PR, sur le depot temoin template/ :
+  # lint, build amd64 + prep scanne, tests sur l'image (sondes de version,
+  # manifeste, inventaire, cloture). Rien n'est pousse.
+  gabarit-build-push:
+    name: Gabarit build-push (template, mode PR)
+    uses: ./.github/workflows/build-push.yml
+    with:
+      workdir: template
+      publish: false
+    # Le gabarit declare des jobs en contents: write (README, release) : un
+    # workflow appele ne peut pas demander plus que l'appelant n'accorde, sinon
+    # GitHub refuse de demarrer tout le workflow (startup_failure).
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+      issues: write
+

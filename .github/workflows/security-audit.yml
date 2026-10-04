@@ -1,0 +1,171 @@
+# =====================================================================
+#  security-audit -- audit hebdomadaire de l'image publiee (etape 3).
+#
+#  Chaque controle tourne jusqu'au bout (continue-on-error), puis :
+#    - une SEULE issue `security` : ouverte, ou commentee si elle l'est deja
+#      (des CVE npm d'amont gardent uptime-kuma rouge chaque semaine : une
+#      issue par semaine noierait celle qui compte) ;
+#    - le job finit ROUGE si un controle a echoue (l'issue ET le run).
+#
+#  Controles : le tag que main doit produire est publie (sinon les rebuilds
+#  echouent en silence -- arrive du 09-10 au 09-30) ; Trivy (SARIF large,
+#  echec sur CRITICAL/HIGH corrigeables) ; Grype en recoupement ; signature
+#  cosign : identite de build-push de l'appelant OU de hardened-ci, ET depot
+#  source = l'appelant (--certificate-github-workflow-repository).
+#
+#  Lit .github/hardened-ci.json (image, version, entrees du compteur) : les
+#  memes que build-push, ecrites une seule fois.
+#
+#    on: {schedule: [{cron: '0 3 * * 2'}], workflow_dispatch: {}}
+#    jobs:
+#      audit:
+#        uses: jbsky/hardened-ci/.github/workflows/security-audit.yml@<sha> # vX.Y.Z
+#        permissions: {contents: read, packages: read, security-events: write, issues: write}
+# =====================================================================
+name: security-audit
+
+on:
+  workflow_call:
+    inputs:
+      workdir:
+        description: Repertoire du depot d'image dans le checkout (tests de hardened-ci seulement)
+        type: string
+        default: .
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+      issues: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+
+      - name: Image et tag attendu
+        id: c
+        env:
+          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+        run: |
+          set -euo pipefail
+          echo "image=ghcr.io/${{ github.repository_owner }}/$("$HCI" get image)" >> "$GITHUB_OUTPUT"
+          echo "tag=$("$HCI" tag)" >> "$GITHUB_OUTPUT"
+
+      - name: main est publie
+        id: publie
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.c.outputs.image }}
+          TAG: ${{ steps.c.outputs.tag }}
+        run: |
+          if docker manifest inspect "${IMAGE}:${TAG}" >/dev/null; then
+            echo "OK -- ${TAG} est publie"
+          else
+            echo "::error::main devrait publier ${IMAGE}:${TAG}, absent du registre -- le dernier build-push de main a echoue ?"
+            exit 1
+          fi
+
+      - name: Trivy full scan (SARIF)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.c.outputs.image }}:latest
+          format: sarif
+          output: trivy-audit.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          scanners: vuln,secret,misconfig
+          exit-code: '0'
+          ignore-unfixed: false
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-audit.sarif
+          category: audit
+
+      - name: Trivy gate (CRITICAL/HIGH corrigeables)
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.c.outputs.image }}:latest
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Grype cross-check
+        id: grype
+        continue-on-error: true
+        uses: anchore/scan-action@v7
+        with:
+          image: ${{ steps.c.outputs.image }}:latest
+          fail-build: 'true'
+          severity-cutoff: high
+          only-fixed: 'true'
+          output-format: table
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Verify signature (identite + depot source)
+        id: verify
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.c.outputs.image }}
+        run: |
+          cosign verify "${IMAGE}:latest" \
+            --certificate-identity-regexp "^https://github\.com/(${GITHUB_REPOSITORY}|jbsky/hardened-ci)/\.github/workflows/build-push\.yml@" \
+            --certificate-github-workflow-repository "${GITHUB_REPOSITORY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+
+      - name: Open or update the security issue
+        if: always()
+        uses: actions/github-script@v9
+        env:
+          O_PUBLIE: ${{ steps.publie.outcome }}
+          O_TRIVY: ${{ steps.trivy.outcome }}
+          O_GRYPE: ${{ steps.grype.outcome }}
+          O_VERIFY: ${{ steps.verify.outcome }}
+        with:
+          script: |
+            const outcomes = [
+              [process.env.O_PUBLIE, 'tag attendu de main absent du registre'],
+              [process.env.O_TRIVY, 'Trivy (CRITICAL/HIGH corrigeables)'],
+              [process.env.O_GRYPE, 'Grype (high+ corrigeables)'],
+              [process.env.O_VERIFY, 'signature cosign (identite ou depot source)'],
+            ];
+            const failed = outcomes.filter(([o]) => o === 'failure').map(([, n]) => `- ${n}`);
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { data: open } = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', labels: 'security', per_page: 50 });
+            const existing = open.find(i => i.title.startsWith('[Security] Audit'));
+            if (failed.length) {
+              const body = `Audit du ${new Date().toISOString().slice(0, 10)} : echec de\n${failed.join('\n')}\n\n[Execution](${run})\n\ncc @${context.repo.owner}`;
+              if (existing) {
+                await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body });
+              } else {
+                await github.rest.issues.create({ ...context.repo, title: '[Security] Audit en echec', body,
+                  labels: ['security', 'automated'] });
+              }
+              core.setFailed(`controles en echec :\n${failed.join('\n')}`);
+            } else if (existing) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number,
+                body: `Audit vert : ${run}` });
+              await github.rest.issues.update({ ...context.repo, issue_number: existing.number, state: 'closed' });
+            }

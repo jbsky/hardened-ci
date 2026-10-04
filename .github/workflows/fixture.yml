@@ -1,0 +1,92 @@
+# =====================================================================
+#  fixture -- publication REELLE de l'image temoin (template/) par le
+#  gabarit build-push, puis preuve de l'identite de signature dans les
+#  deux sens. Lancement manuel seulement ; le paquet ghcr.io/jbsky/app-hardened
+#  est a supprimer apres coup.
+#
+#  Le certificat cosign d'une image signee par le gabarit porte l'identite
+#  jbsky/hardened-ci/.github/workflows/build-push.yml ET, en extension, le
+#  depot appelant (ici hardened-ci lui-meme). Les verificateurs des depots
+#  epinglent ce depot source : la verification doit PASSER avec le bon depot
+#  et ECHOUER avec un autre (php-fpm-hardened).
+# =====================================================================
+name: fixture
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    uses: ./.github/workflows/build-push.yml
+    with:
+      workdir: template
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+      issues: write
+
+  verify:
+    name: Signature -- deux sens
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - name: Bon depot source -- doit passer
+        env:
+          IMAGE: ghcr.io/jbsky/app-hardened:latest
+        run: |
+          cosign verify "$IMAGE" \
+            --certificate-identity-regexp '^https://github\.com/(jbsky/hardened-ci)/\.github/workflows/build-push\.yml@' \
+            --certificate-github-workflow-repository jbsky/hardened-ci \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          cosign verify-attestation --type cyclonedx "$IMAGE" \
+            --certificate-identity-regexp '^https://github\.com/(jbsky/hardened-ci)/\.github/workflows/build-push\.yml@' \
+            --certificate-github-workflow-repository jbsky/hardened-ci \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "signature et SBOM attestee : OK"
+      - name: Autre depot source -- doit echouer
+        env:
+          IMAGE: ghcr.io/jbsky/app-hardened:latest
+        run: |
+          if cosign verify "$IMAGE" \
+               --certificate-identity-regexp '^https://github\.com/(jbsky/php-fpm-hardened|jbsky/hardened-ci)/\.github/workflows/build-push\.yml@' \
+               --certificate-github-workflow-repository jbsky/php-fpm-hardened \
+               --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null 2>&1; then
+            echo "::error::signature acceptee pour un AUTRE depot source : l'epinglage ne protege rien"
+            exit 1
+          fi
+          echo "refusee pour un autre depot source : OK"
+      # Les images DEJA publiees ont ete signees par le build-push du depot
+      # lui-meme : la commande documentee dans les README (identite
+      # depot|hardened-ci + depot source) doit les accepter aussi, et les
+      # refuser pour un autre depot source.
+      - name: Ancienne signature (php 8.5.11.2) -- deux sens
+        env:
+          IMAGE: ghcr.io/jbsky/php-fpm-hardened:8.5.11.2
+        run: |
+          set -uo pipefail
+          id='^https://github\.com/(jbsky/php-fpm-hardened|jbsky/hardened-ci)/'
+          cosign verify "$IMAGE" --certificate-identity-regexp "$id" \
+            --certificate-github-workflow-repository jbsky/php-fpm-hardened \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null \
+            || { echo "::error::nouvelle commande : ancienne signature refusee"; exit 1; }
+          if cosign verify "$IMAGE" --certificate-identity-regexp "$id" \
+               --certificate-github-workflow-repository jbsky/nginx-hardened \
+               --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null 2>&1; then
+            echo "::error::ancienne signature acceptee pour un autre depot source"; exit 1
+          fi
+          echo "ancienne signature : acceptee pour le bon depot, refusee pour un autre"
+      - name: Attestation SLSA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify oci://ghcr.io/jbsky/app-hardened:latest --repo jbsky/hardened-ci

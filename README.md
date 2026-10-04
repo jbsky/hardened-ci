@@ -14,15 +14,18 @@ repository is meant to hold them once:
 
 ## The pipeline of an image repository
 
-What every `*-hardened` repository runs, and where this repository plugs in.
-Shared blocks are highlighted; the others are still local to each image
-repository, with the plan step that will move them here.
+What every `*-hardened` repository runs. Since v1.0.0 the whole `build-push`
+pipeline and the weekly audit are reusable workflows of this repository
+(highlighted); an image repository keeps only its triggers and one
+description file, `.github/hardened-ci.json`. `version-watch` stays local (its
+logic is per upstream); stack-squid (three images tested together) keeps its
+own `build-push` and `security-audit`.
 
 ```mermaid
 flowchart LR
   subgraph BP["build-push.yml -- push to main, tag v*, pull request"]
     direction LR
-    lint["lint<br/>hadolint, ShellCheck, gofmt/vet/test<br/>VENDORED.sha256<br/>versions --check"]
+    lint["lint<br/>hadolint, ShellCheck, gofmt/vet/test<br/>versions --check"]
     build["build (amd64)<br/>versions -> build-args<br/>prep scanned (Trivy, SBOM)<br/>push by digest / PR: tarball"]
     arm["build-arm64<br/>native ubuntu-24.04-arm runner<br/>versions -> build-args, push by digest"]
     test["test<br/>pull the digest, healthy,<br/>version assert, manifest,<br/>closure, smoke tests"]
@@ -53,8 +56,8 @@ flowchart LR
 
   classDef shared fill:#d7f0dd,stroke:#2e7d32,color:#1b3d20
   classDef local fill:#f4f4f4,stroke:#9e9e9e,color:#333
-  class cve,cleanup shared
-  class lint,build,arm,test,rev,promote,readme,release,notify,audit,vw local
+  class cve,cleanup,lint,build,arm,test,rev,promote,readme,release,notify,audit shared
+  class vw local
 ```
 
 | Block | Lives in | Since / plan |
@@ -62,9 +65,9 @@ flowchart LR
 | `versions` check + build-args (in lint, build, build-arm64) | **hardened-ci** action `versions/` | v0.1.0 -> v0.7.0, on all 7 |
 | `cve-watch` | **hardened-ci** reusable workflow | v0.3.0, step 1 |
 | `registry-cleanup` (cleanup job) | **hardened-ci** reusable workflow, runs ITS OWN `prune-*` (checkout at `job.workflow_sha`) | v0.3.0 step 1; own scripts since v0.8.0 |
-| 6 shared scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | **hardened-ci** `scripts/`, reached through the `tools/` action | v0.8.0, step 2 (repositories migrate off their vendored copies) |
-| `security-audit` | each repository | step 3 |
-| `build-push` jobs (lint ... notify) | each repository | step 4, after the signing identity move (cve-watch already accepts both identities) |
+| 6 shared scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | **hardened-ci** `scripts/`, reached through the `tools/` action | v0.8.0, step 2 -- on all 7 |
+| `security-audit` | **hardened-ci** reusable workflow | v1.0.0, step 3 (stack-squid keeps its own) |
+| `build-push` jobs (lint ... notify) | **hardened-ci** reusable workflow + `.github/hardened-ci.json` | v1.0.0, step 4 (stack-squid keeps its own) |
 | `version-watch` | each repository | stays local (logic is per upstream) |
 
 On a pull request the image is built and tested from a tarball, never pushed:
@@ -212,6 +215,69 @@ is byte-identical to v0.8.0 (checked on a published image).
 Locally, `image-manifest.py --generate` (regenerate a repository's manifest)
 runs from a checkout of this repository at the ref its workflow pins:
 `python3 ../hardened-ci/scripts/image-manifest.py --generate <image> -o image.manifest`.
+
+### `build-push` -- the whole image pipeline (reusable workflow)
+
+An image repository keeps its triggers (`on:` and `paths:`, which cannot move
+into a reusable workflow) and describes what makes it different in ONE file,
+read by `build-push` and `security-audit` alike (`scripts/hci-config.py`):
+
+```json
+{
+  "image": "bind9-hardened",
+  "version": {"key": "bind"},
+  "revision": ["bind", "Dockerfile", "init.go", "go.mod", "keys/", "patches/", "versions.json"],
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "validate_on_pr": true,
+  "compose_service": null,
+  "probes": [{"label": "BIND", "want": "version",
+              "cmd": "docker run --rm --entrypoint named \"$IMAGE\" -v", "regex": "BIND \\K[0-9][0-9.]*"}],
+  "smoke": "./scripts/test.sh \"$IMAGE\""
+}
+```
+
+`version` is a `versions.json` key or `{"file": ..., "grep": ...}` (php reads
+its `FROM` line); `revision` is the exact `build-revision.sh` argument list,
+written once (the nginx audit once computed `.18` while CI published `.20`,
+from a second copy). `hci-config.py --check` (config job) fails when a
+`COPY`/`ADD` source is not a revision input (a commit touching only it would
+publish nothing) or a revision input is missing from the caller's
+`push.paths` (no build at all).
+
+```yaml
+jobs:
+  pipeline:
+    uses: jbsky/hardened-ci/.github/workflows/build-push.yml@<sha> # vX.Y.Z
+    permissions: {contents: write, packages: write, id-token: write,
+                  attestations: write, security-events: write, issues: write}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+```
+
+The pipeline fetches this repository at `job.workflow_sha` for its actions and
+scripts. **Signing identity**: images are signed by this workflow, so the
+certificate identity is `jbsky/hardened-ci/.github/workflows/build-push.yml@...`
+and the certificate also carries the calling repository. Verify both:
+
+```sh
+cosign verify ghcr.io/jbsky/<image>:<tag> \
+  --certificate-identity-regexp '^https://github.com/(jbsky/<repo>|jbsky/hardened-ci)/' \
+  --certificate-github-workflow-repository jbsky/<repo> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Without the repository pin, any repository calling this public workflow would
+produce an accepted identity. `fixture.yml` (manual) publishes the
+`template/` image for real and proves both directions: accepted for the right
+repository, refused for another. `test.yml` runs the whole pipeline on
+`template/` in PR mode on every PR.
+
+### `security-audit` -- weekly audit of the published image (reusable workflow)
+
+Every check runs to the end (main's expected tag is published, Trivy, Grype,
+cosign with the repository pin), then one `security` issue is opened or
+commented, and the job fails if any check failed -- the issue AND a red run.
 
 ### `template/` -- starting point of a new image repository
 

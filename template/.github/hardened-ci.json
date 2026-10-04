@@ -1,0 +1,12 @@
+{
+  "image": "app-hardened",
+  "version": {"key": "app"},
+  "revision": ["app", "Dockerfile", "versions.json"],
+  "platforms": ["linux/amd64"],
+  "probes": [
+    {"label": "app", "want": "version",
+     "cmd": "cid=$(docker create \"$IMAGE\" x) && docker cp \"$cid:/VERSION\" - | tar -xO; docker rm -f \"$cid\" >/dev/null",
+     "regex": "^[0-9][0-9.]*"}
+  ],
+  "smoke": null
+}

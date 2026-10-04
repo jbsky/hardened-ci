@@ -7,3 +7,9 @@ paths:
   .github/workflows/registry-cleanup.yml:
     ignore:
       - 'property "workflow_sha" is not defined in object type'
+  .github/workflows/build-push.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'
+  .github/workflows/security-audit.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'
