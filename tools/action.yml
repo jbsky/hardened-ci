@@ -11,8 +11,8 @@
 #      - run: '"${{ steps.hci.outputs.dir }}/build-revision.sh" bind Dockerfile ...'
 #
 #  Scripts : build-revision.sh, check-image-closure.sh, image-manifest.py,
-#  prune-ghcr-tags.sh, prune-registry-tags.sh, update-readme-tags.sh
-#  (plus versions-build-args.py, que l'action versions/ enveloppe deja).
+#  prune-ghcr-tags.sh, prune-registry-tags.sh, sbom-add-gobinaries.sh,
+#  update-readme-tags.sh (plus versions-build-args.py, que l'action versions/ enveloppe deja).
 # =====================================================================
 name: tools
 description: Chemin des scripts partages de hardened-ci, a la ref epinglee
@@ -30,7 +30,8 @@ runs:
         set -euo pipefail
         dir=$(cd "$GITHUB_ACTION_PATH/../scripts" && pwd)
         for f in build-revision.sh check-image-closure.sh image-manifest.py \
-                 prune-ghcr-tags.sh prune-registry-tags.sh update-readme-tags.sh; do
+                 prune-ghcr-tags.sh prune-registry-tags.sh sbom-add-gobinaries.sh \
+                 update-readme-tags.sh; do
           [ -x "$dir/$f" ] || { echo "::error::$f absent ou non executable dans $dir"; exit 1; }
         done
         echo "dir=$dir" >> "$GITHUB_OUTPUT"

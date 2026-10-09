@@ -1,0 +1,214 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.7",
+  "serialNumber": "urn:uuid:181cacea-f0b5-483b-8949-68f675542595",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-09T15:44:45+00:00",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "manufacturer": {
+            "name": "Aqua Security Software Ltd."
+          },
+          "group": "aquasecurity",
+          "name": "trivy",
+          "version": "0.71.1"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "pkg:oci/bind9-hardened@sha256:0fd2f9926fa1c396bed7614e20223a252d48e65af7262e8451bf7148c705338b?arch=amd64&repository_url=ghcr.io%2Fjbsky%2Fbind9-hardened",
+      "type": "container",
+      "name": "ghcr.io/jbsky/bind9-hardened:9.20.29.6",
+      "purl": "pkg:oci/bind9-hardened@sha256:0fd2f9926fa1c396bed7614e20223a252d48e65af7262e8451bf7148c705338b?arch=amd64&repository_url=ghcr.io%2Fjbsky%2Fbind9-hardened",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:231688c1fb73777f5862cd34cd81b8195fd668d7750d859fcd4cca0ec6623f74"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:2f0d96c2dc427392b5a369de7d17dc7973862185d58e88ef00f034cec5492d4e"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:5610a19b97238e73871d0118a9fc638bea18ceb2d8f6a357f9a3ee6c6870ad08"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:6505c4a9746a02175d688063fdae67e4e4a63f29996e787ac22e1b70d8ecdb2e"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:7084b83da6eada065f6f05089dd38ba36a1a194195e98e97af80d5b5d4a90c65"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:c40db7862ae1f34f1c5449888fbd669f920fa24f15aa35947cc345787761134b"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:ed9297fa740b218eae6d6947790efce2af207e1bd4f649866b35ba71092ced39"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:ee1eff2c0159761717caff40920ac2258e2459ca881be72c1cd1e422dfa6fcbc"
+        },
+        {
+          "name": "aquasecurity:trivy:DiffID",
+          "value": "sha256:fd26dbdb1f22d1ba806dfa24c850ea5e093c4db606c21b29df9a8b7ecb7571fa"
+        },
+        {
+          "name": "aquasecurity:trivy:ImageID",
+          "value": "sha256:42f184d300e928643af653fd849fac74ade30dd47e0ac25dde892bc7a6984d43"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:org.opencontainers.image.description",
+          "value": "ISC BIND 9 DNS server -- FROM scratch, non-root, zero shell"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:org.opencontainers.image.licenses",
+          "value": "MPL-2.0 AND LGPL-2.1-or-later"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:org.opencontainers.image.source",
+          "value": "https://github.com/jbsky/bind9-hardened"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:org.opencontainers.image.title",
+          "value": "bind9-hardened"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:org.opencontainers.image.vendor",
+          "value": "jbsky"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:org.opencontainers.image.version",
+          "value": "9.20.29"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:security.hardening.tier",
+          "value": "platine"
+        },
+        {
+          "name": "aquasecurity:trivy:Labels:versions",
+          "value": "bind=9.20.29"
+        },
+        {
+          "name": "aquasecurity:trivy:Reference",
+          "value": "ghcr.io/jbsky/bind9-hardened:9.20.29.6"
+        },
+        {
+          "name": "aquasecurity:trivy:RepoDigest",
+          "value": "ghcr.io/jbsky/bind9-hardened@sha256:0fd2f9926fa1c396bed7614e20223a252d48e65af7262e8451bf7148c705338b"
+        },
+        {
+          "name": "aquasecurity:trivy:RepoTag",
+          "value": "ghcr.io/jbsky/bind9-hardened:9.20.29.6"
+        },
+        {
+          "name": "aquasecurity:trivy:SchemaVersion",
+          "value": "2"
+        },
+        {
+          "name": "aquasecurity:trivy:Size",
+          "value": "17114112"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "b80511c2-4e67-4315-b5c3-27e572b4bd0b",
+      "type": "application",
+      "name": "usr/local/bin/init",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:Class",
+          "value": "lang-pkgs"
+        },
+        {
+          "name": "aquasecurity:trivy:Type",
+          "value": "gobinary"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:golang/bind9-init",
+      "type": "library",
+      "name": "bind9-init",
+      "purl": "pkg:golang/bind9-init",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:5610a19b97238e73871d0118a9fc638bea18ceb2d8f6a357f9a3ee6c6870ad08"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:68431ec481afe81cc73caa1a1000025d7db8eee09cff087f2881e85375efc828"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgID",
+          "value": "bind9-init"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "gobinary"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:golang/stdlib@v1.27.1",
+      "type": "library",
+      "name": "stdlib",
+      "version": "v1.27.1",
+      "purl": "pkg:golang/stdlib@v1.27.1",
+      "properties": [
+        {
+          "name": "aquasecurity:trivy:LayerDiffID",
+          "value": "sha256:5610a19b97238e73871d0118a9fc638bea18ceb2d8f6a357f9a3ee6c6870ad08"
+        },
+        {
+          "name": "aquasecurity:trivy:LayerDigest",
+          "value": "sha256:68431ec481afe81cc73caa1a1000025d7db8eee09cff087f2881e85375efc828"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgID",
+          "value": "stdlib@v1.27.1"
+        },
+        {
+          "name": "aquasecurity:trivy:PkgType",
+          "value": "gobinary"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "b80511c2-4e67-4315-b5c3-27e572b4bd0b",
+      "dependsOn": [
+        "pkg:golang/bind9-init"
+      ]
+    },
+    {
+      "ref": "pkg:golang/bind9-init",
+      "dependsOn": [
+        "pkg:golang/stdlib@v1.27.1"
+      ]
+    },
+    {
+      "ref": "pkg:golang/stdlib@v1.27.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/bind9-hardened@sha256:0fd2f9926fa1c396bed7614e20223a252d48e65af7262e8451bf7148c705338b?arch=amd64&repository_url=ghcr.io%2Fjbsky%2Fbind9-hardened",
+      "dependsOn": [
+        "b80511c2-4e67-4315-b5c3-27e572b4bd0b"
+      ]
+    }
+  ],
+  "vulnerabilities": []
+}

@@ -691,12 +691,34 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: sbom-prep
-      # La SBOM du stage prep, attestee sur chaque digest publie : seule base
-      # d'un audit CVE d'une image FROM scratch (cve-watch la relit chaque jour).
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      # Le binaire Go init est copie de gobuilder dans le stage final, le plus
+      # souvent sans passer par prep : la SBOM prep ne le voyait pas et
+      # cve-watch etait aveugle aux CVE de la stdlib Go (2026-10-09). Les
+      # binaires Go de l'image publiee y sont ajoutes, et rien d'autre.
+      - name: SBOM of the published image (Go binaries)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}
+          format: cyclonedx
+          output: sbom-final.cdx.json
+      - name: Add Go binaries to the prep SBOM
+        run: |
+          set -euo pipefail
+          .hardened-ci/scripts/sbom-add-gobinaries.sh sbom-prep.cdx.json sbom-final.cdx.json > sbom.cdx.json
+          echo "SBOM : $(jq '.components | length' sbom-prep.cdx.json) composants prep -> $(jq '.components | length' sbom.cdx.json) avec les binaires Go"
+      # La SBOM du stage prep (+ binaires Go), attestee sur chaque digest publie :
+      # seule base d'un audit CVE d'une image FROM scratch (cve-watch la relit
+      # chaque jour).
       - name: Attest prep SBOM (CycloneDX)
         env:
           DIGEST: ${{ steps.manifest.outputs.digest }}
-        run: cosign attest --yes --type cyclonedx --predicate sbom-prep.cdx.json "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
+        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
       - name: Trivy scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
