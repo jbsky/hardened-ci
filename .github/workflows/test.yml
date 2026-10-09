@@ -176,6 +176,22 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
+      # La propre + l'init Go de bind9 9.20.29.6 (stdlib v1.27.1) : la CVE Go doit
+      # remonter par la SBOM fusionnee, comme cve-watch la relira.
+      - name: SBOM fusionnee avec un binaire Go
+        run: ./scripts/sbom-add-gobinaries.sh tests/fixtures/sbom/clean.cdx.json tests/fixtures/sbom/final-gobinary.cdx.json > gobinary.cdx.json
+
+      - name: SBOM fusionnee -- scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: sbom
+          scan-ref: gobinary.cdx.json
+          format: json
+          output: gobinary.json
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
       - name: La vulnerable remonte, la propre non
         run: |
           set -euo pipefail
@@ -184,6 +200,9 @@ jobs:
           echo "vulnerable: ${n_vuln} x CVE-2026-14456 | propre: ${n_clean}"
           [ "$n_vuln" -ge 1 ] || { echo "::error::la SBOM vulnerable n'a pas remonte CVE-2026-14456"; exit 1; }
           [ "$n_clean" -eq 0 ] || { echo "::error::la SBOM propre a remonte ${n_clean} CVE"; exit 1; }
+          n_go=$(jq '[.Results[]? | select(.Type == "gobinary") | .Vulnerabilities[]? | select(.VulnerabilityID == "CVE-2026-78667")] | length' gobinary.json)
+          echo "binaire Go fusionne: ${n_go} x CVE-2026-78667"
+          [ "$n_go" -ge 1 ] || { echo "::error::la SBOM fusionnee n'a pas remonte la CVE de la stdlib Go"; exit 1; }
 
   # Les six scripts partages (etape 2) : chacun eprouve dans les deux sens.
   # build-revision sur un historique git connu (les trois formes d'appel des
@@ -206,6 +225,9 @@ jobs:
 
       - name: check-image-closure et image-manifest -- dans les deux sens
         run: ./tests/scripts/image-checks.sh
+
+      - name: sbom-add-gobinaries -- fermeture, racine, rejeu, image sans Go
+        run: ./tests/scripts/sbom-add-gobinaries.sh
 
       - name: Action tools
         id: hci
