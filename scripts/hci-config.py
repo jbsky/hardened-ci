@@ -111,6 +111,29 @@ def push_paths(wf):
     return out
 
 
+def cve_watch_images(wf):
+    """La liste `images:` que l'appelant passe au gabarit cve-watch.
+
+    Lecture texte, sans PyYAML, comme push_paths. Zero ou plusieurs lignes
+    « images: » est une erreur, pas un saut : sauter rendrait ce controle vert
+    sur le defaut meme qu'il cherche.
+    """
+    found = [l for l in Path(wf).read_text().splitlines()
+             if not l.lstrip().startswith("#") and re.match(r"^\s+images:\s*\S", l)]
+    if len(found) != 1:
+        raise SystemExit(f"hci-config: {wf} : {len(found)} ligne(s) « images: », une seule attendue")
+    raw = re.sub(r"^\s+images:\s*", "", found[0]).strip()
+    if len(raw) > 1 and raw[0] in "'\"" and raw[-1] == raw[0]:
+        raw = raw[1:-1]
+    try:
+        v = json.loads(raw)
+    except ValueError as e:
+        raise SystemExit(f"hci-config: {wf} : « images: {raw} » n'est pas une liste JSON ({e})")
+    if not isinstance(v, list) or not v or not all(isinstance(x, str) and x for x in v):
+        raise SystemExit(f"hci-config: {wf} : « images: » doit etre une liste JSON non vide de noms d'images")
+    return v
+
+
 def check(c):
     errors = []
     try:
@@ -134,6 +157,26 @@ def check(c):
                 if not any(fnmatch.fnmatch(probe, g) or probe == g for g in pp):
                     errors.append(f"entree du compteur {i} absente du filtre on.push.paths : "
                                   f"un commit qui ne touche qu'elle ne declencherait aucun build")
+    # Le nom d'image de cve-watch doit etre celui que ce depot publie. Le
+    # gabarit arrive avec « app-hardened » : laisse tel quel (haproxy-hardened,
+    # du 2026-10-04 au 10-14), l'audit quotidien interroge une image qui
+    # n'existe pas, reste VERT, et ouvre une issue « audit impossible » qui ne
+    # peut jamais se fermer. Un nom errone est un defaut de configuration du
+    # depot : il se voit ici, pas dans un run planifie.
+    wfc = Path(".github/workflows/cve-watch.yml")
+    if wfc.exists():
+        expected = {c["image"]} | {i["image"] for i in c.get("images_extra", []) if i.get("image")}
+        try:
+            declared = set(cve_watch_images(wfc))
+        except SystemExit as e:
+            errors.append(str(e))
+        else:
+            for n in sorted(declared - expected):
+                errors.append(f"cve-watch audite {n}, que ce depot ne publie pas : "
+                              f"l'audit reste vert sans rien scanner")
+            for n in sorted(expected - declared):
+                errors.append(f"{n} est publiee mais absente de la liste de cve-watch : "
+                              f"aucune surveillance CVE sur cette image")
     for i, p in enumerate(c["probes"]):
         if not isinstance(p, dict) or not p.get("cmd") or not (p.get("regex") or p.get("expect")):
             errors.append(f"probes[{i}] : cmd et regex (ou expect) obligatoires")
