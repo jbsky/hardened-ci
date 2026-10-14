@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Test de hci-config.py : le fichier de description d'un depot doit couvrir les
-# sources COPY/ADD (sinon un commit qui ne touche qu'elles ne publie rien) et le
-# filtre on.push.paths doit couvrir les entrees du compteur (sinon aucun build).
+# sources COPY/ADD (sinon un commit qui ne touche qu'elles ne publie rien), le
+# filtre on.push.paths doit couvrir les entrees du compteur (sinon aucun build),
+# et la liste d'images de cve-watch doit etre celle que le depot publie (sinon
+# l'audit CVE quotidien reste vert sans rien scanner).
 set -euo pipefail
 H="$(cd "$(dirname "$0")/../../scripts" && pwd)/hci-config.py"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -21,6 +23,16 @@ on:
       - 'Dockerfile'
       - 'conf/**'
       - 'versions.json'
+W
+cat > .github/workflows/cve-watch.yml <<'W'
+on:
+  schedule: [{cron: '30 5 * * *'}]
+jobs:
+  watch:
+    uses: jbsky/hardened-ci/.github/workflows/cve-watch.yml@deadbee # v1.1.0
+    with:
+      images: '["app-hardened"]'
+      selftest: false
 W
 git add -A; git commit -q -m c1
 fail=0
@@ -49,6 +61,26 @@ git checkout -q -- Dockerfile; rm -rf keys
 sed -i "/- 'conf\/\*\*'/d" .github/workflows/build-push.yml
 refuse "conf/ hors paths" "conf/ absente du filtre"
 git checkout -q -- .github/workflows/build-push.yml
+
+# cve-watch sur un nom que le depot ne publie pas (gabarit laisse tel quel)
+sed -i 's|\["app-hardened"\]|["autre-hardened"]|' .github/workflows/cve-watch.yml
+refuse "cve-watch sur une image etrangere" "cve-watch audite autre-hardened"
+git checkout -q -- .github/workflows/cve-watch.yml
+
+# image publiee absente de la liste de cve-watch
+sed -i "s|images: .*|images: '[\"autre-hardened\",\"app-hardened\"]'|" .github/workflows/cve-watch.yml
+refuse "image etrangere en plus de la bonne" "cve-watch audite autre-hardened"
+git checkout -q -- .github/workflows/cve-watch.yml
+
+# liste vide : refus, pas un saut silencieux
+sed -i "s|images: .*|images: '[]'|" .github/workflows/cve-watch.yml
+refuse "liste d'images vide" "liste JSON non vide"
+git checkout -q -- .github/workflows/cve-watch.yml
+
+# ligne images: absente : refus aussi
+sed -i "/images:/d" .github/workflows/cve-watch.yml
+refuse "aucune ligne images:" "0 ligne(s)"
+git checkout -q -- .github/workflows/cve-watch.yml
 
 # sonde incomplete
 python3 - <<'P'
