@@ -87,4 +87,86 @@ python3 - <<'P'
 import json; p=".github/hardened-ci.json"; c=json.load(open(p)); c["probes"]=[{"label":"x","cmd":"true"}]; open(p,"w").write(json.dumps(c))
 P
 refuse "sonde sans regex" 'probes\[0\]'
+git checkout -q -- .github/hardened-ci.json
+
+# =====================================================================
+#  Depot a PLUSIEURS images (stack-squid : squid, c-icap, clamav). Chaque
+#  image a son Dockerfile, son compteur et ses sondes ; le test est commun,
+#  donc les images sont eprouvees ensemble avant qu'aucune soit promue.
+# =====================================================================
+mkdir -p a/conf b
+echo '{"a":"1.0.0","b":"2.0.0"}' > versions.json
+printf 'FROM alpine AS s
+COPY conf/ /etc/a/
+FROM scratch
+COPY --from=s /etc/a /etc/a
+' > a/Dockerfile
+printf 'FROM alpine AS s
+FROM scratch
+' > b/Dockerfile
+echo x > a/conf/x
+cat > .github/hardened-ci.json <<'J'
+{"platforms":["linux/amd64"],
+ "smoke":"./scripts/stack.sh",
+ "images":[
+   {"key":"a","image":"a-hardened","dockerfile":"a/Dockerfile","compose_service":"a",
+    "version":{"key":"a"},"revision":["a","a/","versions.json"],
+    "probes":[{"label":"A","cmd":"echo 1.0.0","regex":"[0-9.]+"}]},
+   {"key":"b","image":"b-hardened","dockerfile":"b/Dockerfile",
+    "version":{"key":"b"},"revision":["b","b/","versions.json"],
+    "probes":[{"label":"B","cmd":"echo 2.0.0","regex":"[0-9.]+"}]}]}
+J
+cat > .github/workflows/build-push.yml <<'W'
+on:
+  push:
+    paths:
+      - 'a/**'
+      - 'b/**'
+      - 'versions.json'
+W
+sed -i 's|\["app-hardened"\]|["a-hardened","b-hardened"]|' .github/workflows/cve-watch.yml
+git add -A; git commit -q -m c2
+
+if "$H" --check >/dev/null 2>&1; then ok "depot multi-images accepte"; else ko "depot multi-images refuse"; "$H" --check; fi
+m=$("$H" matrix)
+if [ "$(jq -r 'length' <<<"$m")" = 2 ] \
+   && [ "$(jq -r '.[0].key' <<<"$m")" = a ] \
+   && [ "$(jq -r '.[0].context' <<<"$m")" = a ] \
+   && [ "$(jq -r '.[0].manifest' <<<"$m")" = a/image.manifest ] \
+   && [ "$(jq -r '.[1].compose_service' <<<"$m")" = '' ]; then
+  ok "matrix : contexte, manifeste et service deduits"
+else ko "matrix inattendue : $m"; fi
+if [ "$("$H" tags)" = '{"a":"1.0.0.0","b":"2.0.0.0"}' ]; then ok "tags des deux images"; else ko "tags $("$H" tags)"; fi
+if [ "$("$H" --image b version)" = 2.0.0 ] && [ "$("$H" version)" = 1.0.0 ]; then
+  ok "--image selectionne, sans lui la premiere"
+else ko "--image : $("$H" --image b version) / $("$H" version)"; fi
+if "$H" --image zz version >/dev/null 2>&1; then ko "--image inconnue acceptee"; else ok "--image inconnue refusee"; fi
+
+# le compteur d'une image ne couvre pas ses propres sources
+sed -i 's|"revision":\["a","a/","versions.json"\]|"revision":["a","versions.json"]|' .github/hardened-ci.json
+refuse "COPY hors compteur de SON image" "images\[a\]"
+git checkout -q -- .github/hardened-ci.json
+
+# une image publiee absente de cve-watch
+sed -i 's|\["a-hardened","b-hardened"\]|["a-hardened"]|' .github/workflows/cve-watch.yml
+refuse "image publiee hors cve-watch" "b-hardened est publiee"
+git checkout -q -- .github/workflows/cve-watch.yml
+
+# cle absente, cle en double, image sans champ obligatoire
+python3 - <<'P'
+import json; p=".github/hardened-ci.json"; c=json.load(open(p)); del c["images"][1]["key"]; open(p,"w").write(json.dumps(c))
+P
+refuse "image sans cle" "key absente ou invalide"
+git checkout -q -- .github/hardened-ci.json
+python3 - <<'P'
+import json; p=".github/hardened-ci.json"; c=json.load(open(p)); c["images"][1]["key"]="a"; open(p,"w").write(json.dumps(c))
+P
+refuse "cle en double" "en double"
+git checkout -q -- .github/hardened-ci.json
+python3 - <<'P'
+import json; p=".github/hardened-ci.json"; c=json.load(open(p)); del c["images"][1]["probes"]; open(p,"w").write(json.dumps(c))
+P
+refuse "image sans sondes" "images\[b\] : champ probes"
+git checkout -q -- .github/hardened-ci.json
+
 exit $fail
