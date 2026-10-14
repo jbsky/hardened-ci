@@ -315,11 +315,50 @@ produce an accepted identity. `fixture.yml` (manual) publishes the
 repository, refused for another. `test.yml` runs the whole pipeline on
 `template/` in PR mode on every PR.
 
+#### A repository that publishes SEVERAL images
+
+`stack-squid` publishes three (`squid`, `c-icap`, `clamav`) and its EICAR test
+exercises them **together**, through one `docker compose`, before any of them is
+promoted. That is why they are one call and not three: `build` is a matrix over
+the declared images, `test` runs **once** on the digests just built, and
+`promote` is a matrix that only runs if that shared test passed. Three images
+cannot be promoted independently when the thing being tested is the chain.
+
+```json
+{
+  "platforms": ["linux/amd64"],
+  "smoke": "./scripts/test-eicar.sh",
+  "images": [
+    {"key": "squid", "image": "squid-hardened", "dockerfile": "squid/Dockerfile",
+     "compose_service": "squid", "version": {"key": "squid"},
+     "revision": ["squid", "squid/", "versions.json"], "probes": [...]},
+    {"key": "c-icap", "image": "c-icap-hardened", "dockerfile": "c-icap/Dockerfile", "...": "..."}
+  ]
+}
+```
+
+Per image: `key` (it names CI artifacts, so `[a-z0-9-]`), `image`, `dockerfile`,
+its own `version` and `revision` inputs, its `probes`, optionally
+`compose_service`, `context` (defaults to the Dockerfile's directory) and
+`manifest` (defaults to `<dir>/image.manifest`). Repository-wide: `platforms`,
+`smoke`, `validate_on_pr`. Each image keeps **its own** revision counter -- a
+commit under `squid/` must not bump `clamav`, which would republish identical
+bytes under a fresh tag. `--check` enforces that each image's `COPY` sources are
+covered by its own counter, resolved against its build context.
+
+The smoke command gets `IMAGE` (the first image) and `IMAGE_<KEY>` for each one
+(`IMAGE_C_ICAP`), so a cross-image test can reach all of them. A single-image
+repository declares nothing new: the fields stay at the root and read as a
+one-element list.
+
 ### `security-audit` -- weekly audit of the published image (reusable workflow)
 
 Every check runs to the end (main's expected tag is published, Trivy, Grype,
 cosign with the repository pin), then one `security` issue is opened or
 commented, and the job fails if any check failed -- the issue AND a red run.
+It is a matrix over the declared images, with one issue per image: a repository
+that publishes three has three security states, and a single issue would mix
+them.
 
 ### `template/` -- starting point of a new image repository
 

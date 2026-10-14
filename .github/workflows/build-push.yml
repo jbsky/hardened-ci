@@ -66,9 +66,14 @@ jobs:
     name: Config
     runs-on: ubuntu-latest
     outputs:
+      # Les images du depot, normalisees et prefixees de `workdir` : c'est la
+      # matrice de build, de promotion et des tests. Un depot mono-image en a
+      # une -- rien ne change pour lui.
+      images: ${{ steps.c.outputs.images }}
+      multi: ${{ steps.c.outputs.multi }}
+      # L'image PREMIERE : ce que les jobs d'echelle depot (release) nomment.
       image: ${{ steps.c.outputs.image }}
       arm64: ${{ steps.c.outputs.arm64 }}
-      compose: ${{ steps.c.outputs.compose }}
       validate: ${{ steps.c.outputs.validate }}
       version: ${{ steps.c.outputs.version }}
       publish: ${{ steps.c.outputs.publish }}
@@ -88,13 +93,25 @@ jobs:
         env:
           HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
           PUBLISH_INPUT: ${{ inputs.publish }}
+          WD: ${{ inputs.workdir }}
         run: |
           set -euo pipefail
           "$HCI" --check
+          # jq assemble les chemins une fois pour toutes : les jobs n'ont plus
+          # qu'a lire matrix.image.path / .file / .gomod / .manifestfile.
+          IMAGES=$("$HCI" matrix | jq -c --arg wd "$WD" '
+            def j($a; $b): if $a == "." then $b elif $b == "." then $a else $a + "/" + $b end;
+            [ .[] | . + {
+                path:         j($wd; .context),
+                file:         j($wd; .dockerfile),
+                manifestfile: j($wd; .manifest),
+                gomod:        j(j($wd; .context); "go.mod")
+              } ]')
           {
+            echo "images=${IMAGES}"
+            echo "multi=$(jq 'length > 1' <<<"$IMAGES")"
             echo "image=$("$HCI" get image)"
             echo "arm64=$("$HCI" get platforms | jq -r 'index("linux/arm64") != null')"
-            echo "compose=$("$HCI" get compose_service | sed 's/^null$//')"
             echo "validate=$("$HCI" get validate_on_pr)"
             echo "version=$("$HCI" version)"
             if [ "$GITHUB_EVENT_NAME" != pull_request ] && [ "$PUBLISH_INPUT" = true ]; then
@@ -137,25 +154,44 @@ jobs:
               || { echo "::error::scripts/$f differe de jbsky/hardened-ci@${{ job.workflow_sha }}"; exit 1; }
           done
 
-      - name: Hadolint
-        uses: hadolint/hadolint-action@v3.5.0
-        with:
-          dockerfile: ${{ inputs.workdir }}/Dockerfile
-          failure-threshold: warning
-
       - name: ShellCheck
         run: |
           set -euo pipefail
           find . -path ./.hardened-ci -prune -o -path ./.git -prune -o -name '*.sh' -print0 \
             | xargs -0 -r shellcheck
 
-      - uses: actions/setup-go@v7
-        if: hashFiles(format('{0}/go.mod', inputs.workdir)) != ''
+  # -------------------------------------------------------------------
+  #  Ce qui se lit PAR IMAGE : hadolint et le module Go. Un depot a trois
+  #  images a trois Dockerfile et trois go.mod (stack-squid) ; un depot
+  #  mono-image passe exactement comme avant, avec une matrice d'un element.
+  # -------------------------------------------------------------------
+  lint-image:
+    name: Lint ${{ matrix.image.key }}
+    needs: config
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.config.outputs.images) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.image.path }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.5.0
         with:
-          go-version-file: ${{ inputs.workdir }}/go.mod
+          dockerfile: ${{ matrix.image.file }}
+          failure-threshold: warning
+
+      - uses: actions/setup-go@v7
+        if: hashFiles(matrix.image.gomod) != ''
+        with:
+          go-version-file: ${{ matrix.image.gomod }}
 
       - name: gofmt, go vet, go test
-        if: hashFiles(format('{0}/go.mod', inputs.workdir)) != ''
+        if: hashFiles(matrix.image.gomod) != ''
         run: |
           set -euo pipefail
           fmt_out=$(gofmt -l .)
@@ -169,18 +205,23 @@ jobs:
   #  tarball passe a `test`, rien n'est pousse.
   # -------------------------------------------------------------------
   build:
-    name: Build image
-    needs: [config, lint]
+    name: Build ${{ matrix.image.key }}
+    needs: [config, lint, lint-image]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       security-events: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
+    strategy:
+      # Une image qui casse ne doit pas masquer l'etat des autres.
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.config.outputs.images) }}
     env:
       PUBLISH: ${{ needs.config.outputs.publish }}
-      IMAGE_NAME: ${{ needs.config.outputs.image }}
+      IMAGE_NAME: ${{ matrix.image.image }}
+      KEY: ${{ matrix.image.key }}
+      COMPOSE: ${{ matrix.image.compose_service }}
     defaults:
       run:
         working-directory: ${{ inputs.workdir }}
@@ -199,16 +240,21 @@ jobs:
         with:
           path: ${{ inputs.workdir }}
 
+      # `compose config --images <service>` rend AUSSI les images des
+      # dependances (squid-explicit depend de c-icap : deux lignes) : filtrer
+      # sur le nom de cette image, et echouer si elle n'y est pas -- un tag
+      # pris au hasard ferait tester l'image d'a cote.
       - name: Tag local attendu par les tests
         id: local
-        env:
-          COMPOSE: ${{ needs.config.outputs.compose }}
         run: |
+          set -euo pipefail
           if [ -n "$COMPOSE" ]; then
-            echo "tag=$(docker compose config --images "$COMPOSE")" >> "$GITHUB_OUTPUT"
+            tag=$(docker compose config --images "$COMPOSE" | grep -E "(^|/)${IMAGE_NAME}(:|@|$)" | head -1)
+            [ -n "$tag" ] || { echo "::error::le service ${COMPOSE} ne porte pas ${IMAGE_NAME}"; exit 1; }
           else
-            echo "tag=${IMAGE_NAME}:test" >> "$GITHUB_OUTPUT"
+            tag="${IMAGE_NAME}:test"
           fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -228,10 +274,11 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
-          context: ${{ inputs.workdir }}
+          context: ${{ matrix.image.path }}
+          file: ${{ matrix.image.file }}
           build-args: ${{ steps.build-args.outputs.build-args }}
           platforms: linux/amd64
-          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0}/{1}/{2},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.NAMESPACE, env.IMAGE_NAME) || 'type=docker,dest=/tmp/image-tar/image.tar' }}
+          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0}/{1}/{2},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.NAMESPACE, env.IMAGE_NAME) || format('type=docker,dest=/tmp/image-tar/{0}.tar', env.KEY) }}
           tags: ${{ env.PUBLISH != 'true' && steps.local.outputs.tag || '' }}
           sbom: ${{ env.PUBLISH }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
@@ -247,7 +294,8 @@ jobs:
       - name: Build prep stage (Alpine with runtime deps)
         uses: docker/build-push-action@v7
         with:
-          context: ${{ inputs.workdir }}
+          context: ${{ matrix.image.path }}
+          file: ${{ matrix.image.file }}
           build-args: ${{ steps.build-args.outputs.build-args }}
           target: prep
           platforms: linux/amd64
@@ -282,7 +330,7 @@ jobs:
       - name: Upload prep SBOM
         uses: actions/upload-artifact@v7
         with:
-          name: sbom-prep
+          name: sbom-prep-${{ env.KEY }}
           path: sbom-prep.cdx.json
           if-no-files-found: error
 
@@ -299,8 +347,30 @@ jobs:
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: image-tar
-          path: /tmp/image-tar/image.tar
+          name: image-tar-${{ env.KEY }}
+          path: /tmp/image-tar/${{ env.KEY }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      # Les sorties d'un job en matrice s'ecrasent entre elles : le digest
+      # passe donc par un artefact nomme par la cle de l'image. C'est lui que
+      # `test` retire et que `promote` etiquette -- l'octet teste est l'octet
+      # publie, matrice ou pas.
+      - name: Digest de l'image construite
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [ -n "$DIGEST" ] || { echo "::error::build n'a pas rendu de digest pour ${KEY}"; exit 1; }
+          printf '%s' "$DIGEST" > "${RUNNER_TEMP}/digest-${KEY}.txt"
+
+      - name: Upload digest
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ env.KEY }}
+          path: ${{ runner.temp }}/digest-${{ env.KEY }}.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -314,8 +384,9 @@ jobs:
       packages: read
     env:
       PUBLISH: ${{ needs.config.outputs.publish }}
-      IMAGE_NAME: ${{ needs.config.outputs.image }}
-      COMPOSE: ${{ needs.config.outputs.compose }}
+      IMAGES: ${{ needs.config.outputs.images }}
+      HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+      SCRIPTS: ${{ github.workspace }}/.hardened-ci/scripts
     defaults:
       run:
         working-directory: ${{ inputs.workdir }}
@@ -328,15 +399,6 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .hardened-ci
 
-      - name: Tag local attendu par les tests
-        id: local
-        run: |
-          if [ -n "$COMPOSE" ]; then
-            echo "tag=$(docker compose config --images "$COMPOSE")" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${IMAGE_NAME}:test" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Login ghcr.io
         if: env.PUBLISH == 'true'
         uses: docker/login-action@v4
@@ -345,126 +407,208 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull built digest for testing
+      - name: Digests construits (hors PR)
         if: env.PUBLISH == 'true'
-        env:
-          REF: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}
-          LOCAL: ${{ steps.local.outputs.tag }}
-        run: |
-          set -euo pipefail
-          docker pull "$REF"
-          docker tag "$REF" "$LOCAL"
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
 
-      - name: Download image tarball (PR only)
+      - name: Tarballs construits (PR)
         if: env.PUBLISH != 'true'
         uses: actions/download-artifact@v8
         with:
-          name: image-tar
+          pattern: image-tar-*
           path: /tmp/image-tar
+          merge-multiple: true
 
-      - name: Load image tarball (PR only)
-        if: env.PUBLISH != 'true'
-        run: docker load -i /tmp/image-tar/image.tar
-
-      - name: Start stack
-        if: env.COMPOSE != ''
-        run: docker compose up -d --no-build "$COMPOSE"
-
-      # Prouve l'instruction HEALTHCHECK de l'image, pas seulement le binaire.
-      - name: Wait for healthy
-        if: env.COMPOSE != ''
+      # Une image a son tag local : celui que le compose attend, ou
+      # <image>:test. L'octet mis sous test est celui que `build` vient de
+      # produire -- tire par digest hors PR, charge du tarball en PR.
+      - name: Charger les images a eprouver
+        env:
+          DIGESTS: ${{ runner.temp }}/digests
         run: |
           set -euo pipefail
-          cid=$(docker compose ps -q "$COMPOSE")
-          for _ in $(seq 1 60); do
-            status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)
-            [ "$status" = healthy ] && exit 0
-            sleep 2
-          done
-          echo "::error::$COMPOSE n'est pas devenu healthy"
-          docker inspect --format '{{json .State.Health}}' "$cid" || true
-          exit 1
+          locals='{}'
+          while read -r key image service; do
+            if [ -n "$service" ] && [ "$service" != null ]; then
+              # Un service qui depend d'un autre fait sortir plusieurs images :
+              # ne garder que celle-ci.
+              LOCAL=$(docker compose config --images "$service" | grep -E "(^|/)${image}(:|@|$)" | head -1)
+              [ -n "$LOCAL" ] || { echo "::error::le service ${service} ne porte pas ${image}"; exit 1; }
+            else
+              LOCAL="${image}:test"
+            fi
+            if [ "$PUBLISH" = true ]; then
+              REF="${REGISTRY}/${NAMESPACE}/${image}@$(cat "${DIGESTS}/digest-${key}.txt")"
+              docker pull -q "$REF"
+              docker tag "$REF" "$LOCAL"
+            else
+              docker load -q -i "/tmp/image-tar/${key}.tar"
+              # Le tarball porte deja le tag local (`tags:` du build).
+              docker image inspect "$LOCAL" > /dev/null
+            fi
+            echo "${key} -> ${LOCAL}"
+            locals=$(jq -c --arg k "$key" --arg l "$LOCAL" '.[$k] = $l' <<<"$locals")
+          done < <(jq -r '.[] | "\(.key) \(.image) \(.compose_service)"' <<<"$IMAGES")
+          printf '%s' "$locals" > "${RUNNER_TEMP}/locals.json"
 
-      # Le tag publie doit nommer ce que l'image contient : php a publie 8.5.8
-      # sous un tag 8.5.9 pendant 18 jours. Chaque sonde interroge l'image.
-      - name: Assert the image is the version we tag it with
-        env:
-          IMAGE: ${{ steps.local.outputs.tag }}
-          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+      # Ce que la pile exige avant de demarrer (stack-squid engendre la CA de
+      # SSL-bump que squid-explicit.conf lit au demarrage).
+      - name: Preparer le terrain
         run: |
-          set -uo pipefail
-          n=$("$HCI" get probes | jq length)
+          set -euo pipefail
+          setup=$("$HCI" get setup)
+          if [ "$setup" = None ] || [ -z "$setup" ] || [ "$setup" = null ]; then
+            echo "rien a preparer (setup)"; exit 0
+          fi
+          bash -c "$setup"
+
+      # Un seul compose pour toutes les images du depot : c'est la raison
+      # d'etre d'un appel unique. stack-squid eprouve squid + c-icap + clamav
+      # ENSEMBLE (EICAR traverse les trois) avant qu'aucune ne soit promue.
+      - name: Start stack
+        id: stack
+        run: |
+          set -euo pipefail
+          mapfile -t services < <(jq -r '.[].compose_service | select(. != null and . != "")' <<<"$IMAGES")
+          if [ "${#services[@]}" -eq 0 ]; then
+            echo "aucun service compose declare"; echo "up=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          profile=$("$HCI" get compose_profile)
+          args=()
+          case "$profile" in None|null|'') ;; *) args+=(--profile "$profile"); echo "profile=$profile" >> "$GITHUB_OUTPUT" ;; esac
+          echo "up=true" >> "$GITHUB_OUTPUT"
+          docker compose "${args[@]}" up -d --no-build "${services[@]}"
+
+      # Prouve l'instruction HEALTHCHECK des images, pas seulement le binaire.
+      - name: Wait for healthy
+        if: steps.stack.outputs.up == 'true'
+        env:
+          PROFILE: ${{ steps.stack.outputs.profile }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$PROFILE" ]; then args=(--profile "$PROFILE"); fi
           rc=0
-          for i in $(seq 0 $((n - 1))); do
-            p=$("$HCI" get probes | jq -c ".[$i]")
-            label=$(jq -r .label <<<"$p")
-            want=$("$HCI" want "$(jq -r '.want // "version"' <<<"$p")")
-            raw=$(IMAGE="$IMAGE" bash -c "$(jq -r .cmd <<<"$p")" 2>&1 || true)
-            regex=$(jq -r '.regex // empty' <<<"$p")
-            got=$(printf '%s' "$raw" | grep -oP "$regex" | head -1 || true)
-            echo "$label declared: ${want} | image: ${got:-<illisible>}"
-            if [ "$want" != "$got" ]; then
-              echo "::error::l'image embarque $label ${got:-<illisible>} mais serait publiee comme ${want}"
-              printf 'sortie de la sonde :\n%s\n' "$raw" | head -5
+          while read -r service; do
+            cid=$(docker compose "${args[@]}" ps -q "$service")
+            ok=false
+            for _ in $(seq 1 60); do
+              status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)
+              [ "$status" = healthy ] && { ok=true; break; }
+              sleep 2
+            done
+            if [ "$ok" = true ]; then
+              echo "${service} : healthy"
+            else
+              echo "::error::${service} n'est pas devenu healthy"
+              docker inspect --format '{{json .State.Health}}' "$cid" || true
               rc=1
             fi
-          done
+          done < <(jq -r '.[].compose_service | select(. != null and . != "")' <<<"$IMAGES")
           exit $rc
 
-      # Le manifeste dit ce qui est DANS l'image (chemins, modes, uid/gid,
+      # Le tag publie doit nommer ce que l'image contient : php a publie 8.5.8
+      # sous un tag 8.5.9 pendant 18 jours. Chaque sonde interroge SON image.
+      - name: Assert the images are the versions we tag them with
+        run: |
+          set -uo pipefail
+          rc=0
+          while read -r key; do
+            IMAGE=$(jq -r --arg k "$key" '.[$k]' "${RUNNER_TEMP}/locals.json")
+            n=$("$HCI" --image "$key" get probes | jq length)
+            for i in $(seq 0 $((n - 1))); do
+              pr=$("$HCI" --image "$key" get probes | jq -c ".[$i]")
+              label=$(jq -r .label <<<"$pr")
+              want=$("$HCI" --image "$key" want "$(jq -r '.want // "version"' <<<"$pr")")
+              raw=$(IMAGE="$IMAGE" bash -c "$(jq -r .cmd <<<"$pr")" 2>&1 || true)
+              regex=$(jq -r '.regex // empty' <<<"$pr")
+              got=$(printf '%s' "$raw" | grep -oP "$regex" | head -1 || true)
+              echo "${key} ${label} declared: ${want} | image: ${got:-<illisible>}"
+              if [ "$want" != "$got" ]; then
+                echo "::error::${key} embarque $label ${got:-<illisible>} mais serait publiee comme ${want}"
+                printf 'sortie de la sonde :\n%s\n' "$raw" | head -5
+                rc=1
+              fi
+            done
+          done < <(jq -r '.[].key' <<<"$IMAGES")
+          exit $rc
+
+      # Le manifeste dit ce qui est DANS chaque image (chemins, modes, uid/gid,
       # capabilities, doublons) : toute derive echoue ici, a regenerer dans le
-      # meme commit si elle est voulue.
-      - name: Image manifest
-        env:
-          IMAGE: ${{ steps.local.outputs.tag }}
-        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/image-manifest.py" --check "$IMAGE" -m image.manifest'
+      # meme commit si elle est voulue. Puis la cloture : le vrai chargeur musl,
+      # dans un chroot sur le filesystem de l'image, resout chaque ELF embarque.
+      - name: Image manifest, inventaire et cloture
+        run: |
+          set -euo pipefail
+          while read -r key image manifest; do
+            IMAGE=$(jq -r --arg k "$key" '.[$k]' "${RUNNER_TEMP}/locals.json")
+            echo "== ${image}"
+            "$SCRIPTS/image-manifest.py" --check "$IMAGE" -m "$manifest"
+            "$SCRIPTS/image-manifest.py" --report -m "$manifest" --name "$image" >> "$GITHUB_STEP_SUMMARY"
+            "$SCRIPTS/check-image-closure.sh" "$IMAGE"
+          done < <(jq -r '.[] | "\(.key) \(.image) \(.manifest)"' <<<"$IMAGES")
 
-      - name: Image inventory (job summary)
-        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/image-manifest.py" --report -m image.manifest --name "$IMAGE_NAME" >> "$GITHUB_STEP_SUMMARY"'
-
-      # Le vrai chargeur musl, dans un chroot sur le filesystem de l'image,
-      # resout chaque ELF embarque (lddtree sort en 0 sur une lib manquante).
-      - name: Image closure
-        env:
-          IMAGE: ${{ steps.local.outputs.tag }}
-        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/check-image-closure.sh" "$IMAGE"'
-
+      # `smoke` est au niveau du depot : un seul jeu de tests fonctionnels,
+      # qui peut traverser plusieurs images. $IMAGE nomme la premiere (le cas
+      # mono-image ne change pas) ; chaque image est aussi dans IMAGE_<CLE>.
       - name: Run smoke tests
-        env:
-          IMAGE: ${{ steps.local.outputs.tag }}
-          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
         run: |
           set -euo pipefail
           smoke=$("$HCI" get smoke)
           if [ "$smoke" = None ] || [ -z "$smoke" ] || [ "$smoke" = null ]; then
             echo "pas de tests fonctionnels declares (smoke)"; exit 0
           fi
-          IMAGE="$IMAGE" bash -c "$smoke"
+          while read -r key; do
+            var="IMAGE_$(printf '%s' "$key" | tr 'a-z-' 'A-Z_')"
+            export "$var=$(jq -r --arg k "$key" '.[$k]' "${RUNNER_TEMP}/locals.json")"
+          done < <(jq -r '.[].key' <<<"$IMAGES")
+          IMAGE=$(jq -r --arg k "$(jq -r '.[0].key' <<<"$IMAGES")" '.[$k]' "${RUNNER_TEMP}/locals.json")
+          export IMAGE
+          bash -c "$smoke"
 
       - name: Container logs (on failure)
-        if: failure() && env.COMPOSE != ''
-        run: docker compose logs
+        if: failure() && steps.stack.outputs.up == 'true'
+        env:
+          PROFILE: ${{ steps.stack.outputs.profile }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$PROFILE" ]; then args=(--profile "$PROFILE"); fi
+          docker compose "${args[@]}" logs
 
       - name: Teardown
-        if: always() && env.COMPOSE != ''
-        run: docker compose down -v
+        if: always() && steps.stack.outputs.up == 'true'
+        env:
+          PROFILE: ${{ steps.stack.outputs.profile }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$PROFILE" ]; then args=(--profile "$PROFILE"); fi
+          docker compose "${args[@]}" down -v
 
   # -------------------------------------------------------------------
   #  arm64 sur runner NATIF (ubuntu-24.04-arm, gratuit en public) : sous QEMU
   #  un rebuild complet prenait 27 min (php) a 1 h 40 (bind9).
   # -------------------------------------------------------------------
   build-arm64:
-    name: Build arm64
-    needs: [config, lint]
+    name: Build arm64 ${{ matrix.image.key }}
+    needs: [config, lint, lint-image]
     if: needs.config.outputs.arm64 == 'true' && needs.config.outputs.publish == 'true'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.config.outputs.images) }}
     env:
-      IMAGE_NAME: ${{ needs.config.outputs.image }}
+      IMAGE_NAME: ${{ matrix.image.image }}
+      KEY: ${{ matrix.image.key }}
     steps:
       - uses: actions/checkout@v7
       - name: hardened-ci a la ref de ce workflow
@@ -489,7 +633,8 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
-          context: ${{ inputs.workdir }}
+          context: ${{ matrix.image.path }}
+          file: ${{ matrix.image.file }}
           build-args: ${{ steps.build-args.outputs.build-args }}
           platforms: linux/arm64
           sbom: true
@@ -499,17 +644,34 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-arm64
           no-cache-filters: prep
 
+      - name: Upload digest arm64
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [ -n "$DIGEST" ] || { echo "::error::build arm64 n'a pas rendu de digest pour ${KEY}"; exit 1; }
+          printf '%s' "$DIGEST" > "${RUNNER_TEMP}/digest-arm64-${KEY}.txt"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-arm64-${{ env.KEY }}
+          path: ${{ runner.temp }}/digest-arm64-${{ env.KEY }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
   # -------------------------------------------------------------------
   #  PR : chaque architecture construite sur son runner natif, sans pousser.
   # -------------------------------------------------------------------
   validate:
-    name: Validate build (PR, ${{ matrix.platform }})
-    needs: [config, lint]
+    name: Validate build (PR, ${{ matrix.image.key }}, ${{ matrix.platform }})
+    needs: [config, lint, lint-image]
     if: needs.config.outputs.validate == 'true' && needs.config.outputs.publish != 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
+        image: ${{ fromJSON(needs.config.outputs.images) }}
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
@@ -532,12 +694,13 @@ jobs:
       - name: Build (no push)
         uses: docker/build-push-action@v7
         with:
-          context: ${{ inputs.workdir }}
+          context: ${{ matrix.image.path }}
+          file: ${{ matrix.image.file }}
           build-args: ${{ steps.build-args.outputs.build-args }}
           platforms: ${{ matrix.platform }}
           push: false
-          cache-from: type=gha,scope=${{ needs.config.outputs.image }}-validate-${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ needs.config.outputs.image }}-validate-${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.image.image }}-validate-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.image }}-validate-${{ matrix.platform }}
 
   # -------------------------------------------------------------------
   #  Un tag <version>.<revision> est immuable : le routeur l'epingle. Deja
@@ -553,8 +716,11 @@ jobs:
       contents: read
       packages: read
     outputs:
-      tag: ${{ steps.revision.outputs.tag }}
-      published: ${{ steps.published.outputs.published }}
+      # Carte {cle: {tag, version, published}} : un job en matrice ne peut pas
+      # rendre une sortie par element, et `promote` a besoin des trois.
+      images: ${{ steps.revision.outputs.images }}
+      # Au moins une image a une revision neuve (sinon rien a promouvoir).
+      any: ${{ steps.revision.outputs.any }}
     defaults:
       run:
         working-directory: ${{ inputs.workdir }}
@@ -570,42 +736,53 @@ jobs:
           repository: jbsky/hardened-ci
           ref: ${{ job.workflow_sha }}
           path: .hardened-ci
-      - name: Compute build revision
+      # Un tour de boucle par image : chacune a son compteur, donc son tag.
+      # Un commit sur squid/ ne doit pas faire monter la revision de clamav.
+      - name: Compute build revisions
         id: revision
-        run: echo "tag=$("$GITHUB_WORKSPACE/.hardened-ci/scripts/hci-config.py" tag)" >> "$GITHUB_OUTPUT"
-      - name: Is this tag already published?
-        id: published
         env:
-          REPO: ${{ env.NAMESPACE }}/${{ needs.config.outputs.image }}
-          TAG: ${{ steps.revision.outputs.tag }}
+          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+          IMAGES: ${{ needs.config.outputs.images }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Jeton AUTHENTIFIE : en anonyme, le registre repond 403 (et non 404)
-          # pour un paquet qui n'existe pas encore -- toute premiere publication
-          # d'un depot echouait ici (vu sur l'image temoin, 2026-10-04).
-          TOKEN=$(curl -fsS -u "${GITHUB_ACTOR}:${GH_TOKEN}" "https://${REGISTRY}/token?scope=repository:${REPO}:pull" | jq -r .token)
-          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-            "https://${REGISTRY}/v2/${REPO}/manifests/${TAG}")
-          case "$CODE" in
-            200) PUBLISHED=true
-                 echo "- \`${TAG}\` est deja publie : pas de promotion (aucun input de l'image n'a change)" >> "$GITHUB_STEP_SUMMARY" ;;
-            404) PUBLISHED=false
-                 echo "- \`${TAG}\` : nouvelle revision, promotion" >> "$GITHUB_STEP_SUMMARY" ;;
-            *)   echo "::error::${REGISTRY} a repondu ${CODE} pour ${REPO}:${TAG}"; exit 1 ;;
-          esac
-          echo "published=${PUBLISHED}" >> "$GITHUB_OUTPUT"
+          out='{}'
+          any=false
+          while read -r key image; do
+            TAG=$("$HCI" --image "$key" tag)
+            VERSION=$("$HCI" --image "$key" version)
+            REPO="${NAMESPACE}/${image}"
+            # Jeton AUTHENTIFIE : en anonyme, le registre repond 403 (et non 404)
+            # pour un paquet qui n'existe pas encore -- toute premiere publication
+            # d'un depot echouait ici (vu sur l'image temoin, 2026-10-04).
+            TOKEN=$(curl -fsS -u "${GITHUB_ACTOR}:${GH_TOKEN}" "https://${REGISTRY}/token?scope=repository:${REPO}:pull" | jq -r .token)
+            CODE=$(curl -sS -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://${REGISTRY}/v2/${REPO}/manifests/${TAG}")
+            case "$CODE" in
+              200) PUBLISHED=true
+                   echo "- \`${image}:${TAG}\` est deja publie : pas de promotion (aucun input de cette image n'a change)" >> "$GITHUB_STEP_SUMMARY" ;;
+              404) PUBLISHED=false; any=true
+                   echo "- \`${image}:${TAG}\` : nouvelle revision, promotion" >> "$GITHUB_STEP_SUMMARY" ;;
+              *)   echo "::error::${REGISTRY} a repondu ${CODE} pour ${REPO}:${TAG}"; exit 1 ;;
+            esac
+            out=$(jq -c --arg k "$key" --arg t "$TAG" --arg v "$VERSION" --argjson p "$PUBLISHED" \
+                    '.[$k] = {tag: $t, version: $v, published: $p}' <<<"$out")
+          done < <(jq -r '.[] | "\(.key) \(.image)"' <<<"$IMAGES")
+          echo "images=${out}" >> "$GITHUB_OUTPUT"
+          echo "any=${any}" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------
   promote:
-    name: Promote tested digests
+    name: Promote ${{ matrix.image.key }}
     needs: [config, build, test, build-arm64, revision]
+    # `test` eprouve les images ENSEMBLE : aucune n'est promue si le test
+    # commun echoue. C'est tout l'interet d'un seul appel pour N images.
     if: >-
       always() && needs.config.outputs.publish == 'true'
       && needs.build.result == 'success' && needs.test.result == 'success'
-      && needs.revision.result == 'success' && needs.revision.outputs.published == 'false'
+      && needs.revision.result == 'success' && needs.revision.outputs.any == 'true'
       && (needs.build-arm64.result == 'success' || needs.build-arm64.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
@@ -614,22 +791,45 @@ jobs:
       id-token: write
       attestations: write
       security-events: write
-    outputs:
-      digest: ${{ steps.manifest.outputs.digest }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        image: ${{ fromJSON(needs.config.outputs.images) }}
     env:
-      IMAGE_NAME: ${{ needs.config.outputs.image }}
-      VERSION: ${{ needs.config.outputs.version }}
-      TAG: ${{ needs.revision.outputs.tag }}
+      IMAGE_NAME: ${{ matrix.image.image }}
+      KEY: ${{ matrix.image.key }}
+      VERSION: ${{ fromJSON(needs.revision.outputs.images)[matrix.image.key].version }}
+      TAG: ${{ fromJSON(needs.revision.outputs.images)[matrix.image.key].tag }}
     steps:
+      # Le contexte `matrix` n'existe pas dans le `if:` d'un job : la garde
+      # d'immuabilite de CETTE image se joue donc ici, et toutes les etapes
+      # suivantes s'y accrochent. Un tag deja publie n'est jamais repromu.
+      - name: Garde d'immuabilite de cette image
+        id: guard
+        env:
+          PUBLISHED: ${{ fromJSON(needs.revision.outputs.images)[matrix.image.key].published }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISHED" = true ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "${IMAGE_NAME}:${TAG} est deja publie : rien a promouvoir."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v7
+        if: steps.guard.outputs.skip == 'false'
       - uses: docker/setup-buildx-action@v4
+        if: steps.guard.outputs.skip == 'false'
       - name: Login ghcr.io
+        if: steps.guard.outputs.skip == 'false'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Check Docker Hub credentials
+        if: steps.guard.outputs.skip == 'false'
         id: dockerhub
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -642,12 +842,13 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Login Docker Hub
-        if: steps.dockerhub.outputs.available == 'true'
+        if: steps.dockerhub.outputs.available == 'true' && steps.guard.outputs.skip == 'false'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Extract metadata
+        if: steps.guard.outputs.skip == 'false'
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -659,14 +860,25 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=${{ env.VERSION }}
             type=raw,value=latest,enable={{is_default_branch}}
+      - name: Digests construits pour cette image
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest*-${{ env.KEY }}
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
       - name: Create tags on the tested digests (no rebuild)
         id: manifest
+        if: steps.guard.outputs.skip == 'false'
         env:
-          AMD64: ${{ needs.build.outputs.digest }}
-          ARM64: ${{ needs.build-arm64.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
+          DIGESTS: ${{ runner.temp }}/digests
         run: |
           set -euo pipefail
+          AMD64=$(cat "${DIGESTS}/digest-${KEY}.txt")
+          ARM64=$(cat "${DIGESTS}/digest-arm64-${KEY}.txt" 2>/dev/null || true)
+          [ -n "$AMD64" ] || { echo "::error::aucun digest amd64 pour ${KEY}"; exit 1; }
           IMAGE="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}"
           args=()
           while IFS= read -r t; do [ -n "$t" ] && args+=(-t "$t"); done <<< "$TAGS"
@@ -676,7 +888,9 @@ jobs:
           DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@v3
+        if: steps.guard.outputs.skip == 'false'
       - name: Sign image (OIDC keyless)
+        if: steps.guard.outputs.skip == 'false'
         env:
           DIGEST: ${{ steps.manifest.outputs.digest }}
           HAS_DOCKERHUB: ${{ steps.dockerhub.outputs.available }}
@@ -688,10 +902,12 @@ jobs:
             COSIGN_REPOSITORY="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}" cosign sign --yes "${HUB}@${DIGEST}"
           fi
       - name: Download prep SBOM
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/download-artifact@v8
         with:
-          name: sbom-prep
+          name: sbom-prep-${{ env.KEY }}
       - name: hardened-ci a la ref de ce workflow
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/checkout@v7
         with:
           repository: jbsky/hardened-ci
@@ -702,12 +918,14 @@ jobs:
       # cve-watch etait aveugle aux CVE de la stdlib Go (2026-10-09). Les
       # binaires Go de l'image publiee y sont ajoutes, et rien d'autre.
       - name: SBOM of the published image (Go binaries)
+        if: steps.guard.outputs.skip == 'false'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}
           format: cyclonedx
           output: sbom-final.cdx.json
       - name: Add Go binaries to the prep SBOM
+        if: steps.guard.outputs.skip == 'false'
         run: |
           set -euo pipefail
           .hardened-ci/scripts/sbom-add-gobinaries.sh sbom-prep.cdx.json sbom-final.cdx.json > sbom.cdx.json
@@ -716,10 +934,12 @@ jobs:
       # seule base d'un audit CVE d'une image FROM scratch (cve-watch la relit
       # chaque jour).
       - name: Attest prep SBOM (CycloneDX)
+        if: steps.guard.outputs.skip == 'false'
         env:
           DIGEST: ${{ steps.manifest.outputs.digest }}
         run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
       - name: Trivy scan
+        if: steps.guard.outputs.skip == 'false'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}
@@ -729,18 +949,20 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
       - name: Upload SARIF
-        if: always()
+        if: always() && steps.guard.outputs.skip == 'false'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
           category: ${{ env.IMAGE_NAME }}
       - name: GitHub SLSA Attestation
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
       - name: Summary
+        if: steps.guard.outputs.skip == 'false'
         env:
           DIGEST: ${{ steps.manifest.outputs.digest }}
         run: |
@@ -778,10 +1000,17 @@ jobs:
           repository: jbsky/hardened-ci
           ref: ${{ job.workflow_sha }}
           path: .hardened-ci
+      # Le script prend autant de specs que d'images : le bloc de tags du
+      # README est rendu d'un coup, N lignes pour N images.
       - name: Rewrite tag block
         env:
-          SPEC: jbsky/${{ needs.config.outputs.image }}=${{ needs.config.outputs.version }}=${{ needs.revision.outputs.tag }}
-        run: '"$GITHUB_WORKSPACE/.hardened-ci/scripts/update-readme-tags.sh" "$SPEC"'
+          IMAGES: ${{ needs.config.outputs.images }}
+          REVS: ${{ needs.revision.outputs.images }}
+        run: |
+          set -euo pipefail
+          mapfile -t specs < <(jq -r --argjson r "$REVS" \
+            '.[] | "jbsky/\(.image)=\($r[.key].version)=\($r[.key].tag)"' <<<"$IMAGES")
+          "$GITHUB_WORKSPACE/.hardened-ci/scripts/update-readme-tags.sh" "${specs[@]}"
       - name: Commit if changed
         run: |
           set -euo pipefail
@@ -811,7 +1040,7 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ${{ needs.config.outputs.image }}
+      IMAGES: ${{ needs.config.outputs.images }}
       KEEP: '6'
     steps:
       - name: hardened-ci a la ref de ce workflow
@@ -825,12 +1054,19 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
+          set -euo pipefail
           if [ -z "$DOCKERHUB_TOKEN" ]; then echo "pas d'identifiants Docker Hub : saute"; exit 0; fi
-          ./.hardened-ci/scripts/prune-registry-tags.sh "$DOCKERHUB_USERNAME" "$IMAGE" "$KEEP"
+          while read -r image; do
+            ./.hardened-ci/scripts/prune-registry-tags.sh "$DOCKERHUB_USERNAME" "$image" "$KEEP"
+          done < <(jq -r '.[].image' <<<"$IMAGES")
       - name: Prune old GHCR tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./.hardened-ci/scripts/prune-ghcr-tags.sh "${{ github.repository_owner }}" "$IMAGE" "$KEEP"
+        run: |
+          set -euo pipefail
+          while read -r image; do
+            ./.hardened-ci/scripts/prune-ghcr-tags.sh "${{ github.repository_owner }}" "$image" "$KEEP"
+          done < <(jq -r '.[].image' <<<"$IMAGES")
 
   # -------------------------------------------------------------------
   release:
@@ -839,7 +1075,7 @@ jobs:
     if: >-
       always() && startsWith(github.ref, 'refs/tags/v')
       && needs.revision.result == 'success'
-      && (needs.promote.result == 'success' || needs.revision.outputs.published == 'true')
+      && (needs.promote.result == 'success' || needs.revision.outputs.any == 'false')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -868,7 +1104,7 @@ jobs:
   # -------------------------------------------------------------------
   notify:
     name: Issue si echec
-    needs: [config, lint, build, test, build-arm64, revision, promote, update-readme, cleanup, release]
+    needs: [config, lint, lint-image, build, test, build-arm64, revision, promote, update-readme, cleanup, release]
     if: always() && needs.config.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
