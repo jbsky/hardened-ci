@@ -40,10 +40,23 @@ jobs:
       packages: read
       attestations: read
     steps:
+      # `:latest` n'est pose que sur la branche par defaut : lance depuis une
+      # branche, ce job echouait sur un MANIFEST_UNKNOWN qui ne disait rien de
+      # la signature (faux rouge, vu le 2026-10-14). Le tag immuable que
+      # `promote` vient de poser, lui, existe toujours.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Tag publie par ce run
+        id: tag
+        working-directory: template
+        run: |
+          set -euo pipefail
+          echo "ref=ghcr.io/jbsky/app-hardened:$("$GITHUB_WORKSPACE/scripts/hci-config.py" tag)" >> "$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@v3
       - name: Bon depot source -- doit passer
         env:
-          IMAGE: ghcr.io/jbsky/app-hardened:latest
+          IMAGE: ${{ steps.tag.outputs.ref }}
         run: |
           cosign verify "$IMAGE" \
             --certificate-identity-regexp '^https://github\.com/(jbsky/hardened-ci)/\.github/workflows/build-push\.yml@' \
@@ -56,7 +69,7 @@ jobs:
           echo "signature et SBOM attestee : OK"
       - name: Autre depot source -- doit echouer
         env:
-          IMAGE: ghcr.io/jbsky/app-hardened:latest
+          IMAGE: ${{ steps.tag.outputs.ref }}
         run: |
           if cosign verify "$IMAGE" \
                --certificate-identity-regexp '^https://github\.com/(jbsky/php-fpm-hardened|jbsky/hardened-ci)/\.github/workflows/build-push\.yml@' \
@@ -89,4 +102,5 @@ jobs:
       - name: Attestation SLSA
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh attestation verify oci://ghcr.io/jbsky/app-hardened:latest --repo jbsky/hardened-ci
+          IMAGE: ${{ steps.tag.outputs.ref }}
+        run: gh attestation verify "oci://${IMAGE}" --repo jbsky/hardened-ci
