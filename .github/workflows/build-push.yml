@@ -445,6 +445,17 @@ jobs:
           done < <(jq -r '.[] | "\(.key) \(.image) \(.compose_service)"' <<<"$IMAGES")
           printf '%s' "$locals" > "${RUNNER_TEMP}/locals.json"
 
+      # Ce que la pile exige avant de demarrer (stack-squid engendre la CA de
+      # SSL-bump que squid-explicit.conf lit au demarrage).
+      - name: Preparer le terrain
+        run: |
+          set -euo pipefail
+          setup=$("$HCI" get setup)
+          if [ "$setup" = None ] || [ -z "$setup" ] || [ "$setup" = null ]; then
+            echo "rien a preparer (setup)"; exit 0
+          fi
+          bash -c "$setup"
+
       # Un seul compose pour toutes les images du depot : c'est la raison
       # d'etre d'un appel unique. stack-squid eprouve squid + c-icap + clamav
       # ENSEMBLE (EICAR traverse les trois) avant qu'aucune ne soit promue.
@@ -456,17 +467,24 @@ jobs:
           if [ "${#services[@]}" -eq 0 ]; then
             echo "aucun service compose declare"; echo "up=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          profile=$("$HCI" get compose_profile)
+          args=()
+          case "$profile" in None|null|'') ;; *) args+=(--profile "$profile"); echo "profile=$profile" >> "$GITHUB_OUTPUT" ;; esac
           echo "up=true" >> "$GITHUB_OUTPUT"
-          docker compose up -d --no-build "${services[@]}"
+          docker compose "${args[@]}" up -d --no-build "${services[@]}"
 
       # Prouve l'instruction HEALTHCHECK des images, pas seulement le binaire.
       - name: Wait for healthy
         if: steps.stack.outputs.up == 'true'
+        env:
+          PROFILE: ${{ steps.stack.outputs.profile }}
         run: |
           set -euo pipefail
+          args=()
+          if [ -n "$PROFILE" ]; then args=(--profile "$PROFILE"); fi
           rc=0
           while read -r service; do
-            cid=$(docker compose ps -q "$service")
+            cid=$(docker compose "${args[@]}" ps -q "$service")
             ok=false
             for _ in $(seq 1 60); do
               status=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)
@@ -544,11 +562,23 @@ jobs:
 
       - name: Container logs (on failure)
         if: failure() && steps.stack.outputs.up == 'true'
-        run: docker compose logs
+        env:
+          PROFILE: ${{ steps.stack.outputs.profile }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$PROFILE" ]; then args=(--profile "$PROFILE"); fi
+          docker compose "${args[@]}" logs
 
       - name: Teardown
         if: always() && steps.stack.outputs.up == 'true'
-        run: docker compose down -v
+        env:
+          PROFILE: ${{ steps.stack.outputs.profile }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$PROFILE" ]; then args=(--profile "$PROFILE"); fi
+          docker compose "${args[@]}" down -v
 
   # -------------------------------------------------------------------
   #  arm64 sur runner NATIF (ubuntu-24.04-arm, gratuit en public) : sous QEMU

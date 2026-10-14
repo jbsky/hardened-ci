@@ -43,7 +43,11 @@ HERE = Path(__file__).resolve().parent
 # Par image. `platforms` est au niveau du depot : une seule matrice de plateformes.
 PER_IMAGE = {"image": str, "version": dict, "revision": list, "probes": list}
 REQUIRED = {**PER_IMAGE, "platforms": list}
-DEFAULTS = {"compose_service": None, "smoke": None, "validate_on_pr": False}
+DEFAULTS = {"compose_service": None, "smoke": None, "validate_on_pr": False,
+            # Prepare le terrain avant `compose up` (stack-squid engendre la CA
+            # de SSL-bump que squid-explicit.conf exige) et profil compose a
+            # activer (ses services squid sont derriere « explicit »).
+            "setup": None, "compose_profile": None}
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
