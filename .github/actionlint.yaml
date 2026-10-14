@@ -13,3 +13,6 @@ paths:
   .github/workflows/security-audit.yml:
     ignore:
       - 'property "workflow_sha" is not defined in object type'
+  .github/workflows/base-watch.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'

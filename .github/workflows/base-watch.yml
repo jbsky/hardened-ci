@@ -1,0 +1,120 @@
+# =====================================================================
+#  Base Watch -- le digest des images de base suit l'amont tout seul
+#  (workflow reutilisable, `on: workflow_call` seulement).
+#
+#  Les `FROM` du parc ecrivent tag ET digest en dur : le tag documente, le
+#  digest est ce qui est reellement construit. L'amont republie ce meme tag
+#  (golang:1.27-alpine a change de digest trois fois en 2026) et rien dans le
+#  depot ne le voit. Dependabot ne suffit pas : une PR de bump FERMEE lui
+#  interdit de reproposer la meme dependance, et le mouvement du 2026-10-13
+#  n'a donne une PR que sur 1 depot sur 8.
+#
+#  Meme chaine que version-watch, qui l'a eprouvee : bump -> commit -> push
+#  -> dispatch de build-push. Un push fait avec GITHUB_TOKEN ne declenche
+#  aucun `on: push` (garde anti-recursion de GitHub), d'ou le dispatch
+#  explicite -- sans lui le commit resterait sur main sans jamais publier.
+#
+#  Le TAG n'est jamais touche : passer de 1.27 a 1.28, ou d'alpine 3.24 a
+#  3.25, reste une decision humaine (PR Dependabot, ecosysteme docker).
+#
+#  Chaque depot d'image garde un appelant mince avec le planning :
+#
+#    on:
+#      schedule: [{cron: '0 7 * * *'}]
+#      workflow_dispatch:
+#        inputs: {dry_run: {type: boolean, default: false}}
+#    permissions: {contents: write, actions: write}
+#    jobs:
+#      watch:
+#        uses: jbsky/hardened-ci/.github/workflows/base-watch.yml@<sha> # vX.Y.Z
+#        with:
+#          dry_run: ${{ inputs.dry_run == true }}
+# =====================================================================
+name: base-watch
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: Relever les digests et s'arreter la (ni commit, ni push, ni publication)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: Digests des images de base
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+
+      # Un digest illisible, mal forme, ou qui designe un manifeste
+      # mono-architecture fait echouer le script : ecrire un digest mono-arch
+      # casserait les builds arm64, et sauter en silence rendrait cette veille
+      # verte sans rien avoir verifie.
+      # Le releve sort du depot (RUNNER_TEMP) : rien a nettoyer avant le
+      # commit, et aucun risque de committer le rapport.
+      - name: Relever les digests courants
+        id: scan
+        env:
+          OUT: ${{ runner.temp }}/base-digests.json
+        run: |
+          set -euo pipefail
+          .hardened-ci/scripts/base-digests.py --update > "$OUT"
+          jq -r '.unchanged[] | "a jour  \(.image) \(.digest[7:19])"' "$OUT"
+          jq -r '.changed[]   | "BOUGE   \(.image) \(.old[7:19]) -> \(.new[7:19]) (\(.files | join(", ")))"' "$OUT"
+          {
+            echo "### Images de base"
+            jq -r '.unchanged[] | "- `\(.image)` a jour (`\(.digest[7:19])`)"' "$OUT"
+            jq -r '.changed[]   | "- **`\(.image)`** `\(.old[7:19])` → `\(.new[7:19])` — \(.files | join(", "))"' "$OUT"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "changed=$(jq '.changed | length' "$OUT")" >> "$GITHUB_OUTPUT"
+          # Le sujet vient du passage qui vient de reecrire : relance apres
+          # coup, le script ne verrait plus aucune derive.
+          echo "subject=$(jq -r '.subject' "$OUT")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit et push
+        if: steps.scan.outputs.changed != '0' && !inputs.dry_run
+        env:
+          SUBJECT: ${{ steps.scan.outputs.subject }}
+          OUT: ${{ runner.temp }}/base-digests.json
+        run: |
+          set -euo pipefail
+          BODY=$(jq -r '.changed[] | "\(.image) : \(.old) -> \(.new)"' "$OUT")
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "$SUBJECT" -m "$BODY" -m "Digest courant de l'amont, releve par base-watch. Tag inchange."
+          # version-watch, le rafraichissement du README et cve-watch ecrivent
+          # aussi sur main : une course est normale, pas une erreur.
+          for essai in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "push refuse (essai ${essai}) -- rebase sur l'origine"
+            git pull --rebase --autostash
+          done
+          echo "::error::push impossible apres 3 essais"; exit 1
+
+      # Sans ce dispatch le commit dort sur main : la publication n'aurait lieu
+      # qu'au prochain commit humain, et le tag immuable ne dirait pas la verite
+      # sur le socle de l'image publiee.
+      - name: Declencher build-push
+        if: steps.scan.outputs.changed != '0' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-push.yml --ref main -R "$GITHUB_REPOSITORY"
+
+      - name: Rien a faire
+        if: steps.scan.outputs.changed == '0'
+        run: echo "Toutes les images de base sont au digest courant."

@@ -68,6 +68,7 @@ flowchart LR
 | 6 shared scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | **hardened-ci** `scripts/`, reached through the `tools/` action | v0.8.0, step 2 -- on all 7 |
 | `security-audit` | **hardened-ci** reusable workflow | v1.0.0, step 3 (stack-squid keeps its own) |
 | `build-push` jobs (lint ... notify) | **hardened-ci** reusable workflow + `.github/hardened-ci.json` | v1.0.0, step 4 (stack-squid keeps its own) |
+| `base-watch` | **hardened-ci** reusable workflow + script `base-digests.py` | v1.2.0, on all 8 |
 | `version-watch` | each repository | stays local (logic is per upstream) |
 
 On a pull request the image is built and tested from a tarball, never pushed:
@@ -156,6 +157,47 @@ end-to-end proof that an alert reaches the mailbox. Tested here both ways: the
 issue logic is replayed on the script extracted from the shipped workflow
 (`tests/cve-watch/issue.test.js`), and detection on two frozen SBOMs (one
 vulnerable forever, one with a single fictitious package).
+
+### `base-watch` -- the base image digests follow upstream on their own (reusable workflow)
+
+Every `FROM` of the fleet writes tag AND digest literally: the tag documents,
+the digest is what is actually built. Upstream republishes that same tag --
+`golang:1.27-alpine` changed digest three times in 2026 -- and nothing in the
+repository notices. Dependabot is not enough: a bump PR that was *closed* bars
+it from ever proposing that dependency again, and the 2026-10-13 move produced
+a PR on 1 repository out of 8.
+
+`base-watch` resolves the current index digest of every `image:tag` referenced
+by the Dockerfiles, rewrites it, commits, pushes, and dispatches `build-push`
+-- the chain `version-watch` has proven (a push made with `GITHUB_TOKEN` fires
+no `on: push` workflow, hence the explicit dispatch; without it the commit
+would sit on main and never publish).
+
+The **tag is never touched**: moving to `golang:1.28-alpine` or `alpine:3.25`
+stays a human decision, i.e. a Dependabot PR on the `docker` ecosystem.
+
+```yaml
+on:
+  schedule: [{cron: '0 7 * * *'}]        # after version-watch (6:00), no race on main
+  workflow_dispatch:
+    inputs: {dry_run: {type: boolean, default: false}}
+permissions: {contents: read}
+jobs:
+  watch:
+    uses: jbsky/hardened-ci/.github/workflows/base-watch.yml@<sha> # vX.Y.Z
+    permissions: {contents: write, actions: write}
+    with:
+      dry_run: ${{ inputs.dry_run == true }}
+```
+
+`dry_run: true` resolves and reports, commits nothing. An unreadable digest, a
+malformed one, or one that points at a single-architecture manifest is an
+**error**: writing a single-arch digest would break the arm64 builds, and
+skipping silently would make the watch green without having checked anything.
+`scripts/base-digests.py` is stdlib-only, its resolver is injectable, and
+`scripts/test_base_digests.py` covers idempotence, `--platform`, lines without
+a digest (`FROM prep`, `${BASE_IMAGE}`), one image shared by three Dockerfiles,
+and each of those three errors.
 
 ### `registry-cleanup` -- prune old immutable tags (reusable workflow)
 
