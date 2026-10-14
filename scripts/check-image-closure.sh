@@ -20,7 +20,15 @@
 # =====================================================================
 set -eu
 
-ALPINE="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+# Image d'OUTILLAGE : elle ne fournit que `lddtree` et le shell qui exporte
+# puis chroote le filesystem a verifier -- le chargeur musl interroge, lui,
+# vient de l'image sous test. Elle doit neanmoins suivre la branche Alpine du
+# parc (3.24), pour que lddtree soit celui de la distribution qu'on verifie.
+#
+# Ce pin est une VARIABLE SHELL : ni Dependabot ni base-watch ne le voient
+# (ils lisent les lignes FROM des Dockerfile). Il se met donc a jour a la
+# main, quand la branche Alpine du parc change de digest.
+ALPINE="alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
 RC=0
 SANS_LOADER=0
 
