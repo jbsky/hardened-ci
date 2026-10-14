@@ -356,6 +356,9 @@ one-element list.
 Every check runs to the end (main's expected tag is published, Trivy, Grype,
 cosign with the repository pin), then one `security` issue is opened or
 commented, and the job fails if any check failed -- the issue AND a red run.
+It is a matrix over the declared images, with one issue per image: a repository
+that publishes three has three security states, and a single issue would mix
+them.
 
 ### `template/` -- starting point of a new image repository
 

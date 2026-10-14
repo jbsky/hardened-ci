@@ -36,14 +36,46 @@ permissions:
   contents: read
 
 jobs:
+  # Les images du depot : un depot peut en publier plusieurs (stack-squid),
+  # et chacune a son tag attendu, son scan et son issue.
+  config:
+    name: Config
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.c.outputs.images }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.workdir }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: hardened-ci a la ref de ce workflow
+        uses: actions/checkout@v7
+        with:
+          repository: jbsky/hardened-ci
+          ref: ${{ job.workflow_sha }}
+          path: .hardened-ci
+      - name: Lire .github/hardened-ci.json
+        id: c
+        env:
+          HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+        run: |
+          set -euo pipefail
+          "$HCI" --check
+          echo "images=$("$HCI" matrix)" >> "$GITHUB_OUTPUT"
+
   audit:
-    name: Audit
+    name: Audit ${{ matrix.image.key }}
+    needs: config
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
       security-events: write
       issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.config.outputs.images) }}
     defaults:
       run:
         working-directory: ${{ inputs.workdir }}
@@ -62,10 +94,11 @@ jobs:
         id: c
         env:
           HCI: ${{ github.workspace }}/.hardened-ci/scripts/hci-config.py
+          KEY: ${{ matrix.image.key }}
         run: |
           set -euo pipefail
-          echo "image=ghcr.io/${{ github.repository_owner }}/$("$HCI" get image)" >> "$GITHUB_OUTPUT"
-          echo "tag=$("$HCI" tag)" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${{ github.repository_owner }}/${{ matrix.image.image }}" >> "$GITHUB_OUTPUT"
+          echo "tag=$("$HCI" --image "$KEY" tag)" >> "$GITHUB_OUTPUT"
 
       - name: main est publie
         id: publie
@@ -97,7 +130,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-audit.sarif
-          category: audit
+          category: audit-${{ matrix.image.image }}
 
       - name: Trivy gate (CRITICAL/HIGH corrigeables)
         id: trivy
@@ -142,6 +175,7 @@ jobs:
           O_TRIVY: ${{ steps.trivy.outcome }}
           O_GRYPE: ${{ steps.grype.outcome }}
           O_VERIFY: ${{ steps.verify.outcome }}
+          IMAGE_NAME: ${{ matrix.image.image }}
         with:
           script: |
             const outcomes = [
@@ -154,13 +188,18 @@ jobs:
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const { data: open } = await github.rest.issues.listForRepo({
               ...context.repo, state: 'open', labels: 'security', per_page: 50 });
-            const existing = open.find(i => i.title.startsWith('[Security] Audit'));
+            // Une issue par image : un depot qui en publie trois a trois
+            // etats de securite, et une seule issue melangerait les trois.
+            // Les anciennes issues sans nom d'image sont encore reconnues.
+            const titre = `[Security] Audit en echec -- ${process.env.IMAGE_NAME}`;
+            const existing = open.find(i => i.title === titre)
+              || open.find(i => i.title === '[Security] Audit en echec');
             if (failed.length) {
-              const body = `Audit du ${new Date().toISOString().slice(0, 10)} : echec de\n${failed.join('\n')}\n\n[Execution](${run})\n\ncc @${context.repo.owner}`;
+              const body = `Audit de \`${process.env.IMAGE_NAME}\` du ${new Date().toISOString().slice(0, 10)} : echec de\n${failed.join('\n')}\n\n[Execution](${run})\n\ncc @${context.repo.owner}`;
               if (existing) {
                 await github.rest.issues.createComment({ ...context.repo, issue_number: existing.number, body });
               } else {
-                await github.rest.issues.create({ ...context.repo, title: '[Security] Audit en echec', body,
+                await github.rest.issues.create({ ...context.repo, title: titre, body,
                   labels: ['security', 'automated'] });
               }
               core.setFailed(`controles en echec :\n${failed.join('\n')}`);
