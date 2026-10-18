@@ -169,8 +169,19 @@ bump. And **one rebuild per CVE list**: the job writes
 `<!-- rebuild:<hash> -->` in the issue once `build-push` is dispatched. If the
 CVE survives, the fix is not in the built Alpine index yet, and the issue
 waits for a human instead of minting an identical immutable tag every morning.
-The mark is written only *after* the dispatch, so a failed rebuild is retried
-the next day rather than silently dropped.
+The mark is written only *after* the dispatch, so a `rebuild` job that fails
+(push refused, unknown image) is retried the next day rather than silently
+dropped. A `build-push` that goes red *after* the dispatch is not retried --
+the mark is already there -- and its own failure issue is the signal.
+
+The `rebuild` job declares **no** `permissions` of its own: a job of a called
+workflow that asks for more than the caller granted fails the whole run at
+startup, with no jobs and no check run, so a repository left behind -- a
+Dependabot bump moves the SHA but adds no permissions -- would go blind on
+CVEs. By inheriting, the worst case is a refused push in that one job: the
+audit ran, the alert went out, the failure is red and named. And
+`hci-config.py --check` demands those permissions on the calling job, so the
+bump PR itself goes red before anyone merges it.
 
 `selftest: true` scans a known vulnerable image under a separate issue: the
 end-to-end proof that an alert reaches the mailbox -- and never rebuilds, the
