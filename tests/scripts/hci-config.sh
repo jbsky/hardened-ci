@@ -30,6 +30,11 @@ on:
 jobs:
   watch:
     uses: jbsky/hardened-ci/.github/workflows/cve-watch.yml@deadbee # v1.1.0
+    permissions:
+      contents: write
+      issues: write
+      packages: read
+      actions: write
     with:
       images: '["app-hardened"]'
       selftest: false
@@ -80,6 +85,16 @@ git checkout -q -- .github/workflows/cve-watch.yml
 # ligne images: absente : refus aussi
 sed -i "/images:/d" .github/workflows/cve-watch.yml
 refuse "aucune ligne images:" "0 ligne(s)"
+git checkout -q -- .github/workflows/cve-watch.yml
+
+# droits du job cve-watch : un bump Dependabot du SHA n'en ajoute aucun, et
+# sans eux la reconstruction automatique est refusee en silence cote push.
+sed -i '/      actions: write/d' .github/workflows/cve-watch.yml
+refuse "cve-watch sans actions: write" "doit accorder actions: write"
+git checkout -q -- .github/workflows/cve-watch.yml
+
+sed -i '/    permissions:/,/      actions: write/d' .github/workflows/cve-watch.yml
+refuse "cve-watch sans aucun droit" "doit accorder contents: write"
 git checkout -q -- .github/workflows/cve-watch.yml
 
 # sonde incomplete

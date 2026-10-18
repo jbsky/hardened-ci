@@ -214,6 +214,47 @@ def cve_watch_images(wf):
     return v
 
 
+# Ce que le job appelant de cve-watch doit accorder. Le gabarit ne les
+# DEMANDE pas (un job appele qui demande plus que l'appelant n'accorde fait
+# echouer le run entier au demarrage, et la surveillance CVE devient muette) :
+# il en herite. Sans eux, l'audit tourne et seule la reconstruction echoue --
+# ce controle est la pour que ca ne dure pas, et surtout pour qu'un bump
+# Dependabot du SHA, qui n'ajoute aucun droit, rougisse sur la PR.
+DROITS_CVE_WATCH = {"contents": "write", "issues": "write",
+                    "packages": "read", "actions": "write"}
+
+
+def cve_watch_permissions(wf):
+    """Les droits accordes au job qui appelle le gabarit cve-watch.
+
+    Lecture texte, sans PyYAML, comme push_paths. Le bloc `permissions:` est
+    cherche au creux du job (celui de la ligne `uses:`), avant ou apres elle --
+    l'ordre des cles est libre en YAML. Le bloc du WORKFLOW, lui, est au creux
+    zero : il ne peut pas etre confondu.
+    """
+    lignes = [l for l in Path(wf).read_text().splitlines() if not l.lstrip().startswith("#")]
+    appel = [l for l in lignes if "uses:" in l and "cve-watch.yml@" in l]
+    if len(appel) != 1:
+        raise SystemExit(f"hci-config: {wf} : {len(appel)} appel(s) au gabarit cve-watch, un seul attendu")
+    creux = len(appel[0]) - len(appel[0].lstrip())
+    droits, dedans = {}, False
+    for l in lignes:
+        if not l.strip():
+            continue
+        c = len(l) - len(l.lstrip())
+        if c < creux:
+            dedans = False
+            continue
+        if c == creux:
+            dedans = l.strip() == "permissions:"
+            continue
+        if dedans:
+            m = re.match(r"^\s+([a-z-]+):\s*(\S+)\s*$", l)
+            if m:
+                droits[m.group(1)] = m.group(2)
+    return droits
+
+
 def check(c):
     errors = []
     imgs = images(c)
@@ -275,6 +316,16 @@ def check(c):
             for n in sorted(expected - declared):
                 errors.append(f"{n} est publiee mais absente de la liste de cve-watch : "
                               f"aucune surveillance CVE sur cette image")
+        try:
+            droits = cve_watch_permissions(wfc)
+        except SystemExit as e:
+            errors.append(str(e))
+        else:
+            manquants = [f"{k}: {v}" for k, v in DROITS_CVE_WATCH.items() if droits.get(k) != v]
+            if manquants:
+                errors.append(f"cve-watch : le job doit accorder {', '.join(manquants)} -- sinon "
+                              f"la reconstruction automatique d'une CVE de paquet Alpine est "
+                              f"refusee ; l'audit, lui, tourne")
     for img in imgs:
         ou = f"images[{img['key']}] : " if len(imgs) > 1 else ""
         for i, pr in enumerate(img["probes"]):
