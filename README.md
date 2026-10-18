@@ -147,16 +147,39 @@ permissions: {contents: read, issues: write, packages: read}
 jobs:
   watch:
     uses: jbsky/hardened-ci/.github/workflows/cve-watch.yml@<sha> # vX.Y.Z
+    permissions: {contents: write, issues: write, packages: read, actions: write}
     with:
       images: '["php-fpm-hardened"]'
       selftest: ${{ inputs.selftest == true }}
 ```
 
+An **Alpine package CVE is rebuilt on its own** (`rebuild: false` opts out).
+`apk upgrade` in the `prep` stage takes the fixed version at the next build,
+so there is nothing to decide -- but a build with no commit on a revision
+input promotes nothing: `<version>.<revision>` already exists, the `revision`
+job skips the promotion and the run stays green without publishing. The
+`rebuild` job therefore stamps one comment line in the Dockerfile
+(`scripts/cve-stamp.py`, rewritten in place, never stacked), pushes it and
+dispatches `build-push` -- the chain `base-watch` has proven. One commit and
+one dispatch per repository, whatever the number of images audited.
+
+Only `Class: os-pkgs` triggers it. A Go binary is fixed by the `golang`
+digest, not by any commit (bind9 #39); an application dependency by a version
+bump. And **one rebuild per CVE list**: the job writes
+`<!-- rebuild:<hash> -->` in the issue once `build-push` is dispatched. If the
+CVE survives, the fix is not in the built Alpine index yet, and the issue
+waits for a human instead of minting an identical immutable tag every morning.
+The mark is written only *after* the dispatch, so a failed rebuild is retried
+the next day rather than silently dropped.
+
 `selftest: true` scans a known vulnerable image under a separate issue: the
-end-to-end proof that an alert reaches the mailbox. Tested here both ways: the
-issue logic is replayed on the script extracted from the shipped workflow
-(`tests/cve-watch/issue.test.js`), and detection on two frozen SBOMs (one
-vulnerable forever, one with a single fictitious package).
+end-to-end proof that an alert reaches the mailbox -- and never rebuilds, the
+image is not ours. Tested here both ways: the issue logic *and the rebuild
+decision* are replayed on the script extracted from the shipped workflow
+(`tests/cve-watch/issue.test.js`), detection on two frozen SBOMs (one
+vulnerable forever, one with a single fictitious package), and the stamp in
+`scripts/test_cve_stamp.py` (one line, rewritten in place, invisible to
+`base-digests.py`).
 
 ### `base-watch` -- the base image digests follow upstream on their own (reusable workflow)
 
