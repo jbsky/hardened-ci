@@ -163,9 +163,15 @@ job skips the promotion and the run stays green without publishing. The
 dispatches `build-push` -- the chain `base-watch` has proven. One commit and
 one dispatch per repository, whatever the number of images audited.
 
-Only `Class: os-pkgs` triggers it. A Go binary is fixed by the `golang`
-digest, not by any commit (bind9 #39); an application dependency by a version
-bump. And **one rebuild per CVE list**: the job writes
+Only `Class: os-pkgs` triggers it, and the issue says where each other fix
+comes from -- `gobinary` alone is not an answer. The Go **stdlib** comes from
+the compiler, so the `golang` digest fixes it and no commit does (bind9 #39).
+A Go **module** depends on which binary carries it: in our `init` it is the
+repository's `go.mod`; in the service binary, compiled from upstream sources,
+it is upstream's dependency -- neither the `golang` digest nor a rebuild moves
+it (traefik #1, `golang.org/x/net`). Trivy names each result after the binary
+path, which is how the two are told apart. A non-Go application dependency is
+a version bump. And **one rebuild per CVE list**: the job writes
 `<!-- rebuild:<hash> -->` in the issue once `build-push` is dispatched. If the
 CVE survives, the fix is not in the built Alpine index yet, and the issue
 waits for a human instead of minting an identical immutable tag every morning.
