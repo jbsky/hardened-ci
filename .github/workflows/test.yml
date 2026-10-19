@@ -231,6 +231,9 @@ jobs:
       - name: check-image-closure et image-manifest -- dans les deux sens
         run: ./tests/scripts/image-checks.sh
 
+      - name: compose-image -- le bon service, et l'echec qui se nomme
+        run: ./tests/scripts/compose-image.sh
+
       - name: sbom-add-gobinaries -- fermeture, racine, rejeu, image sans Go
         run: ./tests/scripts/sbom-add-gobinaries.sh
 
