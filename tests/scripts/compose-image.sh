@@ -32,4 +32,11 @@ if out=$("$S/compose-image.sh" autre app-hardened 2>&1); then ko "un service qui
 elif grep -q '::error::le service autre ne porte pas app-hardened' <<<"$out"; then ok "echec en nommant les deux noms"
 else ko "echec muet : [$out]"; fi
 
+# --- service inconnu : le message de docker, et surtout PAS le notre, qui
+# accuserait le nom de l'image alors que c'est le service qui n'existe pas ---
+if out=$("$S/compose-image.sh" fantome app-hardened 2>&1); then ko "un service inexistant a ete accepte : [$out]"
+elif ! grep -q 'no such service' <<<"$out"; then ko "docker n'a pas pu dire pourquoi : [$out]"
+elif grep -q '::error::le service' <<<"$out"; then ko "notre message accuse l'image alors que le service n'existe pas : [$out]"
+else ok "service inconnu : docker dit pourquoi, sans accusation a cote"; fi
+
 exit $fail

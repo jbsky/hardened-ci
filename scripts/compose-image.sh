@@ -20,6 +20,10 @@ set -euo pipefail
 service=$1
 image=$2
 
-tag=$(docker compose config --images "$service" | grep -E "(^|/)${image}(:|@|$)" | head -1 || true)
+# En deux temps : un compose invalide ou un service inconnu doit sortir SON
+# message (`no such service: ...`), pas le notre -- le `|| true` du grep, lui,
+# ne couvre que le cas "aucune ligne ne correspond".
+images=$(docker compose config --images "$service")
+tag=$(printf '%s\n' "$images" | grep -E "(^|/)${image}(:|@|$)" | head -1 || true)
 [ -n "$tag" ] || { echo "::error::le service ${service} ne porte pas ${image}"; exit 1; }
 printf '%s\n' "$tag"
