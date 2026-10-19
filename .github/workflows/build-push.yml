@@ -241,16 +241,16 @@ jobs:
           path: ${{ inputs.workdir }}
 
       # `compose config --images <service>` rend AUSSI les images des
-      # dependances (squid-explicit depend de c-icap : deux lignes) : filtrer
-      # sur le nom de cette image, et echouer si elle n'y est pas -- un tag
-      # pris au hasard ferait tester l'image d'a cote.
+      # dependances (squid-explicit depend de c-icap : deux lignes) : le script
+      # filtre sur le nom de cette image et dit lequel des deux noms est faux.
       - name: Tag local attendu par les tests
         id: local
+        env:
+          SCRIPTS: ${{ github.workspace }}/.hardened-ci/scripts
         run: |
           set -euo pipefail
           if [ -n "$COMPOSE" ]; then
-            tag=$(docker compose config --images "$COMPOSE" | grep -E "(^|/)${IMAGE_NAME}(:|@|$)" | head -1)
-            [ -n "$tag" ] || { echo "::error::le service ${COMPOSE} ne porte pas ${IMAGE_NAME}"; exit 1; }
+            tag=$("$SCRIPTS/compose-image.sh" "$COMPOSE" "$IMAGE_NAME")
           else
             tag="${IMAGE_NAME}:test"
           fi
@@ -436,8 +436,7 @@ jobs:
             if [ -n "$service" ] && [ "$service" != null ]; then
               # Un service qui depend d'un autre fait sortir plusieurs images :
               # ne garder que celle-ci.
-              LOCAL=$(docker compose config --images "$service" | grep -E "(^|/)${image}(:|@|$)" | head -1)
-              [ -n "$LOCAL" ] || { echo "::error::le service ${service} ne porte pas ${image}"; exit 1; }
+              LOCAL=$("$SCRIPTS/compose-image.sh" "$service" "$image")
             else
               LOCAL="${image}:test"
             fi
