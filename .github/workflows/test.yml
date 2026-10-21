@@ -237,6 +237,9 @@ jobs:
       - name: sbom-add-gobinaries -- fermeture, racine, rejeu, image sans Go
         run: ./tests/scripts/sbom-add-gobinaries.sh
 
+      - name: base-watch -- le gitlink du checkout ne part pas dans le commit
+        run: ./tests/scripts/base-watch.sh
+
       - name: Action tools
         id: hci
         uses: ./tools

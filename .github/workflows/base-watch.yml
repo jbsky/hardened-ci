@@ -95,7 +95,19 @@ jobs:
           BODY=$(jq -r '.changed[] | "\(.image) : \(.old) -> \(.new)"' "$OUT")
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
+          # Jamais `git add -A` ici : ce job a checkout jbsky/hardened-ci dans
+          # .hardened-ci, au milieu de l'espace de travail, et git enregistre
+          # un depot imbrique comme un gitlink (mode 160000) sans la moindre
+          # entree .gitmodules. Les depots du parc l'ont recu ainsi, et chaque
+          # checkout sortait ensuite « fatal: No url found for submodule path
+          # '.hardened-ci' » (exit 128). Seuls les fichiers que
+          # base-digests.py vient de reecrire partent dans le commit.
+          jq -r '.changed[].files[]' "$OUT" | sort -u > "${RUNNER_TEMP}/fichiers.txt"
+          xargs -r -a "${RUNNER_TEMP}/fichiers.txt" git add --
+          if git diff --cached --quiet; then
+            echo "::error::des digests ont bouge mais rien n'est stage (chemins releves : $(tr '\n' ' ' < "${RUNNER_TEMP}/fichiers.txt"))"
+            exit 1
+          fi
           git commit -m "$SUBJECT" -m "$BODY" -m "Digest courant de l'amont, releve par base-watch. Tag inchange."
           # version-watch, le rafraichissement du README et cve-watch ecrivent
           # aussi sur main : une course est normale, pas une erreur.
