@@ -20,12 +20,13 @@ That is the one property to keep in mind when reviewing a pull request here.
 Every caller pins a **commit SHA**, never a moving tag:
 
 ```yaml
-uses: jbsky/hardened-ci/.github/workflows/build-push.yml@c0be9ec…  # v1.4.3
+uses: jbsky/hardened-ci/.github/workflows/build-push.yml@436323be…  # v1.4.4
 ```
 
-A caller therefore keeps running the exact revision it reviewed until someone
-bumps that SHA in a pull request of its own. `v1.4.3` is a comment: it says
-which release the SHA belongs to, it does not select it.
+All nine image repositories are on that SHA today. A caller keeps running the
+exact revision it reviewed until someone bumps the SHA in a pull request of
+its own. `# v1.4.4` is a comment: it says which release the SHA belongs to, it
+does not select it.
 
 The shared **scripts** follow the same rule. A reusable workflow checks
 `jbsky/hardened-ci` out again at `${{ job.workflow_sha }}` — the SHA of the
@@ -39,24 +40,37 @@ and no long-lived key is stored here.
 
 ## Gates on this repository
 
+Everything below runs on push and on pull request, except where stated.
+
 | Gate | Workflow | Covers |
 |---|---|---|
-| `actionlint` | `lint.yml`, on push and pull request | every workflow file of this repository |
-| unit tests | `test.yml`, on push and pull request | `python3 -m unittest discover -s scripts`, the `versions` action on a sound *and* a faulty repository, the `template/` image instantiated and built, and the `cve-watch` issue logic replayed case by case |
-| end-to-end fixture | `fixture.yml`, **manual only** | publishes `template/` through the real `build-push`, then proves the cosign identity both ways: the right source repository must pass, another must fail |
-| self-audit | `base-watch`, `cve-watch`, `security-audit` | this repository runs on its own blocks |
+| `actionlint` | `lint.yml` | every workflow file of this repository |
+| script unit tests | `test.yml` | `python3 -m unittest discover -s scripts` |
+| the `versions` action, both ways | `test.yml` | a sound repository must pass, a faulty one must fail |
+| shared scripts | `test.yml` | revision counter, dependency closure, image manifest, the `tools/` action |
+| `cve-watch`, both ways | `test.yml` | its issue logic replayed case by case, and its detection on a vulnerable *and* a clean image |
+| the real `build-push`, in PR mode | `test.yml` | `template/` instantiated, linted, built and put through the functional tests by the reusable workflow itself |
+| end-to-end fixture | `fixture.yml`, **manual only** | publishes `template/` through `build-push` for real, then proves the cosign identity both ways: the right source repository must pass, another must fail |
 
-A reusable workflow changed without a `fixture` run is a change proved by
-nothing: `actionlint` and the unit tests never execute a workflow. Since
-`fixture` is manual, running it is the reviewer's call, not the CI's — and it
-publishes `ghcr.io/jbsky/app-hardened`, which is to be deleted afterwards.
+So a change to a reusable workflow *is* executed by the CI — `build-push` runs
+on the witness image in PR mode on every pull request. What no automatic gate
+covers is the **publication path**: pushing tags, `cosign` signing, SBOM
+attestation, registry pruning. Only `fixture` proves those, it is manual, and
+it publishes `ghcr.io/jbsky/app-hardened`, which is to be deleted afterwards.
+Running it is the reviewer's call.
+
+This repository does **not** audit itself. `base-watch`, `cve-watch` and
+`security-audit` here are `on: workflow_call` only — they are the blocks the
+image repositories call, not schedules of this one. Nothing here is published
+as an image, so there is nothing of ours to scan weekly.
 
 ## Releasing
 
-One release per behaviour change, `vX.Y.Z`, and the callers are bumped in
-separate pull requests — one repository at a time, each with its own green
-CI. A release that nine repositories adopt at once is a release that breaks
-nine repositories at once.
+One release per behaviour change, `vX.Y.Z`, and no caller moves on its own:
+bumping the pinned SHA opens **one pull request per repository**, and each is
+merged only once *its* CI is green. A release that nine repositories adopt
+without nine green pipelines is a release that breaks nine repositories at
+once.
 
 ## Vulnerabilities in the images
 
