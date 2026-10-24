@@ -10,7 +10,7 @@
 #  par defaut, tout ARG sans cle, toute cle morte, tout ARG sans garde.
 # =====================================================================
 
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS builder
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS builder
 ARG APP_VERSION
 # Echouer tout de suite, avec la marche a suivre, plutot que construire a vide.
 RUN test -n "${APP_VERSION}" \
@@ -24,7 +24,7 @@ RUN mkdir -p /out && printf '%s\n' "${APP_VERSION}" > /out/VERSION
 # Stage prep : les paquets runtime qui finiront dans l'image (aucun ici). Le
 # gabarit build-push le construit a part et le scanne (Trivy, SBOM attestee) :
 # c'est le seul stage encore lisible par un scanner.
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS prep
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS prep
 
 # Image finale : FROM scratch, rien d'autre que ce que le service exige ; sa
 # cloture de dependances est verifiee a chaque build (check-image-closure.sh).
