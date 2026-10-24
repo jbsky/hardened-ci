@@ -25,6 +25,13 @@ RUN mkdir -p /out && printf '%s\n' "${APP_VERSION}" > /out/VERSION
 # gabarit build-push le construit a part et le scanne (Trivy, SBOM attestee) :
 # c'est le seul stage encore lisible par un scanner.
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS prep
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+# apk upgrade d'abord : `apk add` ne met jamais a jour un paquet deja dans la
+# base (libcrypto3, musl...). Les dix depots du parc l'ont ; le gabarit ne
+# l'avait pas, et c'est ce qui laissait ses CVE de base visibles meme apres
+# une remontee de digest. prep n'est jamais cache (no-cache-filters) : le
+# stage scanne est donc a jour quel que soit l'age du digest.
+RUN apk upgrade --no-cache
 
 # Image finale : FROM scratch, rien d'autre que ce que le service exige ; sa
 # cloture de dependances est verifiee a chaque build (check-image-closure.sh).
