@@ -5,10 +5,11 @@
 # never get deleted otherwise, since every build pushes a brand new
 # immutable version tag without ever retiring the previous one.
 #
-# GHCR pruning is handled separately by actions/delete-package-versions in
-# the workflow, since GHCR's package API doesn't fit a portable curl+jq
-# script as cleanly as Docker Hub's REST API does.
+# Which tags survive is decided by prune-keep-tags.sh, shared with
+# prune-ghcr-tags.sh so the two registries cannot drift apart on it.
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DOCKERHUB_USERNAME="${1:?usage: prune-registry-tags.sh <dockerhub_username> <repo> [keep_count]}"
 REPO="${2:?usage: prune-registry-tags.sh <dockerhub_username> <repo> [keep_count]}"
@@ -23,41 +24,29 @@ TOKEN=$(curl -fsSL -X POST "https://hub.docker.com/v2/users/login/" \
 TAGS_JSON=$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" \
   "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/${REPO}/tags?page_size=100")
 
-# Matches X.Y (squid's 7.6), X.Y.Z (nginx's 1.30.4) and the revisioned forms
-# that carry a build counter as their last component (7.6.13, 1.30.4.2).
-# Anything NOT matched here is deleted unconditionally further down, so this
-# range has to grow whenever the tag scheme does -- a 4-component tag under
-# the old {1,2} would have been wiped on its first prune run.
-# Sort descending via per-key "nr" -- a trailing global "-r" after
-# explicit "-k ...n" keys does NOT reverse them (verified: GNU coreutils 9.7
-# sorted ascending despite -r), a well-known GNU sort pitfall.
-mapfile -t SEMVER_TAGS < <(echo "$TAGS_JSON" | jq -r '.results[].name' \
-  | grep -E '^[0-9]+(\.[0-9]+){1,3}$' \
-  | sort -t. -k1,1nr -k2,2nr -k3,3nr -k4,4nr)
+ALL_TAGS=$(echo "$TAGS_JSON" | jq -r '.results[].name')
 
-KEEP_TAGS=("${SEMVER_TAGS[@]:0:${KEEP_COUNT}}")
+mapfile -t KEEP_TAGS < <(printf '%s\n' "$ALL_TAGS" | "$HERE/prune-keep-tags.sh" "$KEEP_COUNT")
 
-# A revisioned tag (7.6.13) and the short tag that floats to it (7.6) name the
-# same build, but the short one sorts below every revision of itself -- so a
-# plain "newest KEEP_COUNT" deletes exactly the tag deployments pin. Keep any
-# tag that is a dot-prefix of one already being kept.
+declare -A KEPT=()
+for tag in "${KEEP_TAGS[@]}"; do KEPT["$tag"]=1; done
+
+# Same ordering as the keep list, so the log reads newest-to-oldest.
+mapfile -t SEMVER_TAGS < <(
+  printf '%s\n' "$ALL_TAGS" \
+  | { grep -E '^[0-9]+(\.[0-9]+){1,3}$' || true; } \
+  | sort -t. -k1,1nr -k2,2nr -k3,3nr -k4,4nr
+)
+
 DELETE_SEMVER=()
-for tag in "${SEMVER_TAGS[@]:${KEEP_COUNT}}"; do
-  protected=false
-  for kept in "${KEEP_TAGS[@]}"; do
-    case "$kept" in "${tag}."*) protected=true; break ;; esac
-  done
-  if [ "$protected" = true ]; then
-    KEEP_TAGS+=("$tag")
-  else
-    DELETE_SEMVER+=("$tag")
-  fi
+for tag in "${SEMVER_TAGS[@]}"; do
+  [ -n "${KEPT[$tag]+x}" ] || DELETE_SEMVER+=("$tag")
 done
 
 # auto-* (and any other non-semver, non-latest) tags are point-in-time
 # snapshots already preserved via git tags + GitHub Releases -- never meant
 # for pinning, always safe to prune.
-mapfile -t AUTO_TAGS < <(echo "$TAGS_JSON" | jq -r '.results[].name' \
+mapfile -t AUTO_TAGS < <(printf '%s\n' "$ALL_TAGS" \
   | grep -vE '^[0-9]+(\.[0-9]+){1,3}$' | grep -v '^latest$' || true)
 
 DELETE_TAGS=("${DELETE_SEMVER[@]}" "${AUTO_TAGS[@]}")

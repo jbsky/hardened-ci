@@ -7,6 +7,8 @@
 # tagged manifest.
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 OWNER="${1:?usage: prune-ghcr-tags.sh <owner> <package> [keep_count]}"
 PACKAGE="${2:?usage: prune-ghcr-tags.sh <owner> <package> [keep_count]}"
 KEEP_COUNT="${3:-3}"
@@ -41,26 +43,15 @@ done
 # signature was deleted every single build because "sha256-...sig"/".att"
 # tags matched no protected pattern. Fix: inspect the FULL tag set of a
 # version and protect it if ANY tag on it deserves protection.
-# {1,3} also matches the revisioned tags (7.6.13, 1.30.4.2); anything not
-# matched here is treated as a disposable snapshot and deleted.
-mapfile -t ALL_SEMVER < <(echo "$VERSIONS_JSON" \
+
+# Which semver tags survive is decided by prune-keep-tags.sh, shared with
+# prune-registry-tags.sh so Docker Hub and GHCR cannot drift apart on it.
+mapfile -t KEEP_LIST < <(echo "$VERSIONS_JSON" \
   | jq -r '.[].metadata.container.tags[]?' \
-  | grep -E '^[0-9]+(\.[0-9]+){1,3}$' \
-  | sort -t. -k1,1nr -k2,2nr -k3,3nr -k4,4nr)
+  | "$HERE/prune-keep-tags.sh" "$KEEP_COUNT")
 
 declare -A KEEP_SEMVER=()
-for tag in "${ALL_SEMVER[@]:0:${KEEP_COUNT}}"; do
-  KEEP_SEMVER["$tag"]=1
-done
-
-# The short tag (7.6) floats to the newest revision (7.6.13) but sorts below
-# every one of them, so keeping only the newest KEEP_COUNT would delete the
-# tag deployments actually pin. Keep any tag that is a dot-prefix of a kept one.
-for tag in "${ALL_SEMVER[@]:${KEEP_COUNT}}"; do
-  for kept in "${!KEEP_SEMVER[@]}"; do
-    case "$kept" in "${tag}."*) KEEP_SEMVER["$tag"]=1; break ;; esac
-  done
-done
+for tag in "${KEEP_LIST[@]}"; do KEEP_SEMVER["$tag"]=1; done
 
 mapfile -t TAGGED < <(echo "$VERSIONS_JSON" \
   | jq -r '.[] | select(.metadata.container.tags | length > 0) | "\(.id)\t" + (.metadata.container.tags | join(","))')
