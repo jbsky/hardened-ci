@@ -24,13 +24,28 @@ mapfile -t SEMVER_TAGS < <(
   | sort -t. -k1,1nr -k2,2nr -k3,3nr -k4,4nr
 )
 
-KEEP_TAGS=("${SEMVER_TAGS[@]:0:${KEEP_COUNT}}")
+# A tag is "floating" when another tag extends it with a dot: 7.6 next to
+# 7.6.13, 3.7.14 next to 3.7.14.2. It is republished on every build of its
+# series, so nothing can be pinned on it -- only the leaf tags, the immutable
+# revisions, are worth a slot in the window. Letting a floating tag take one
+# is what deleted traefik-hardened 3.7.14.0, the image the k3s ingress was
+# serving, while its KEEP=6 window was supposedly holding six revisions.
+LEAVES=()
+FLOATING=()
+for tag in "${SEMVER_TAGS[@]}"; do
+  floating=false
+  for other in "${SEMVER_TAGS[@]}"; do
+    case "$other" in "${tag}."*) floating=true; break ;; esac
+  done
+  if [ "$floating" = true ]; then FLOATING+=("$tag"); else LEAVES+=("$tag"); fi
+done
 
-# A revisioned tag (7.6.13) and the short tag that floats to it (7.6) name the
-# same build, but the short one sorts below every revision of itself -- so a
-# plain "newest KEEP_COUNT" deletes exactly the tag deployments pin. Keep any
-# tag that is a dot-prefix of one already being kept.
-for tag in "${SEMVER_TAGS[@]:${KEEP_COUNT}}"; do
+KEEP_TAGS=("${LEAVES[@]:0:${KEEP_COUNT}}")
+
+# A floating tag then costs nothing: kept when it points into a revision that
+# survives, dropped when its whole series left the window -- keeping it there
+# would leave a live tag naming a manifest this very run deletes.
+for tag in "${FLOATING[@]}"; do
   for kept in "${KEEP_TAGS[@]}"; do
     case "$kept" in "${tag}."*) KEEP_TAGS+=("$tag"); break ;; esac
   done
