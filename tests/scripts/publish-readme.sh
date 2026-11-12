@@ -20,7 +20,7 @@ SQUID=jbsky/squid-hardened
 # Un depot d'origine avec un README deja rendu pour les specs donnees.
 nouvel_origin() {  # nouvel_origin <nom> <spec>...
   local n=$1; shift
-  git init -q --bare "$T/$n.git"
+  git init -q --bare -b main "$T/$n.git"
   git clone -q "$T/$n.git" "$T/$n-seed" 2>/dev/null
   (
     cd "$T/$n-seed"
