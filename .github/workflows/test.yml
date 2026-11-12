@@ -240,6 +240,9 @@ jobs:
       - name: base-watch -- le gitlink du checkout ne part pas dans le commit
         run: ./tests/scripts/base-watch.sh
 
+      - name: publish-readme -- course entre deux runs, jamais de recul de tag
+        run: ./tests/scripts/publish-readme.sh
+
       - name: Action tools
         id: hci
         uses: ./tools

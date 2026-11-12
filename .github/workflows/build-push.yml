@@ -1000,29 +1000,23 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .hardened-ci
       # Le script prend autant de specs que d'images : le bloc de tags du
-      # README est rendu d'un coup, N lignes pour N images.
-      - name: Rewrite tag block
+      # README est rendu d'un coup, N lignes pour N images. Il le pousse aussi :
+      # un push refuse (un autre build-push a ecrit entre-temps) n'est pas
+      # rebase -- deux runs reecrivent les memes lignes, d'ou un conflit de
+      # contenu insoluble -- mais re-rendu sur la tete de la branche, sans jamais
+      # faire reculer un tag plus recent (scripts/publish-readme.sh).
+      - name: Rewrite tag block and push
         env:
           IMAGES: ${{ needs.config.outputs.images }}
           REVS: ${{ needs.revision.outputs.images }}
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           mapfile -t specs < <(jq -r --argjson r "$REVS" \
             '.[] | "jbsky/\(.image)=\($r[.key].version)=\($r[.key].tag)"' <<<"$IMAGES")
-          "$GITHUB_WORKSPACE/.hardened-ci/scripts/update-readme-tags.sh" "${specs[@]}"
-      - name: Commit if changed
-        run: |
-          set -euo pipefail
-          if git diff --quiet README.md; then echo "README already names the current tag"; exit 0; fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git commit -m "docs(readme): tag immuable courant [skip ci]"
-          for _ in 1 2 3; do
-            git push && exit 0
-            git pull --rebase origin "${{ github.event.repository.default_branch }}" || true
-          done
-          exit 1
+          "$GITHUB_WORKSPACE/.hardened-ci/scripts/publish-readme.sh" "$BRANCH" "${specs[@]}"
 
   # -------------------------------------------------------------------
   #  Garde les 6 derniers tags immuables (+ :latest) ; scripts prune-* de
