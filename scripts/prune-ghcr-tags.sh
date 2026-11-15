@@ -98,13 +98,25 @@ for id in "${DELETE_IDS[@]}"; do
   # A concurrent run (e.g. several dependabot PRs merged close together, each
   # triggering its own build+cleanup) may have already deleted this exact
   # version -- a 404 here means the goal state is already reached, not a
-  # real failure. Any other error still aborts the script.
-  if ! output=$(gh api --method DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" 2>&1); then
-    if echo "$output" | grep -q '"status":"404"'; then
-      echo "  (already deleted by a concurrent run, skipping)"
-    else
+  # real failure.
+  #
+  # A 5xx is GHCR, not us (squid-hardened, 2026-11-11, run 43024405022: one
+  # 502 turned a published build red): retry it, like the listing above. A
+  # DELETE answered 5xx may still have gone through, which is why a 404 on
+  # the retry counts as success. Any other error (403...) aborts at once.
+  for attempt in 1 2 3 4 5; do
+    if output=$(gh api --method DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" 2>&1); then
+      break
+    fi
+    if [[ "$output" == *'"status":"404"'* || "$output" == *'(HTTP 404)'* ]]; then
+      echo "  (already deleted, skipping)"
+      break
+    fi
+    if [[ "$output" != *'(HTTP 5'[0-9][0-9]')'* ]] || [ "$attempt" -eq 5 ]; then
       echo "$output" >&2
       exit 1
     fi
-  fi
+    echo "  DELETE failed with a 5xx (attempt ${attempt}/5), retrying in $((attempt * 5))s..." >&2
+    sleep "$((attempt * 5))"
+  done
 done
