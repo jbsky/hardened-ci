@@ -26,6 +26,12 @@ cat > "$TMPD/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 # faux gh : listing fixe, DELETE pilote par $FAKE_DIR/scenario
 if [ "$2" != "--method" ]; then
+  # listing : echoue $FAKE_DIR/list_fail fois (403, retente quand meme : mode any)
+  k=$(cat "$FAKE_DIR/list_fail" 2>/dev/null || echo 0)
+  if [ "$k" -gt 0 ]; then
+    echo $((k - 1)) > "$FAKE_DIR/list_fail"
+    echo 'gh: Forbidden (HTTP 403)' >&2; exit 1
+  fi
   echo '[{"id":1,"metadata":{"container":{"tags":["latest","2.0.0"]}}},{"id":2,"metadata":{"container":{"tags":["auto-20260101.1"]}}}]'
   exit 0
 fi
@@ -74,5 +80,11 @@ else ko "502 persistant (appels=$(appels toujours))"; cat "$TMPD/toujours/sortie
 if ! joue r403 403 ok && [ "$(appels r403)" = 1 ]; then
   ok "403 : sortie non nulle, aucun retry"
 else ko "403 (appels=$(appels r403))"; cat "$TMPD/r403/sortie"; fi
+
+# --- 6. le listing retente toute erreur (mode any), puis supprime ----------
+mkdir -p "$TMPD/liste"; echo 2 > "$TMPD/liste/list_fail"
+if joue liste ok && [ "$(appels liste)" = 1 ] && [ "$(cat "$TMPD/liste/list_fail")" = 0 ]; then
+  ok "listing en echec x2 puis ok : retente, puis 1 DELETE"
+else ko "listing retente"; cat "$TMPD/liste/sortie"; fi
 
 exit "$fail"

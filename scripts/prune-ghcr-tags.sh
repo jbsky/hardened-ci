@@ -20,17 +20,36 @@ KEEP_COUNT="${3:-3}"
 # deep enough that GHCR intermittently 502s partway through. Confirmed on
 # c-icap-hardened (196 versions, 193 untagged): retrying the whole listing
 # a few times clears it, no different than a human re-running the workflow.
-for attempt in 1 2 3 4 5; do
-  if VERSIONS_JSON=$(gh api "/users/${OWNER}/packages/container/${PACKAGE}/versions" --paginate 2>&1); then
-    break
-  fi
-  if [ "$attempt" -eq 5 ]; then
-    echo "$VERSIONS_JSON" >&2
-    exit 1
-  fi
-  echo "Listing versions failed (attempt ${attempt}/5), retrying in $((attempt * 5))s..." >&2
-  sleep "$((attempt * 5))"
-done
+# gh_api_retry <any|5xx> <gh api args...> -- one retry policy for every GHCR
+# call of this script (5 attempts, 5/10/15/20 s apart). Output in GH_OUT.
+#   any : retry whatever the error (the paginated listing, see above);
+#   5xx : retry only a 5xx, and return 44 on a 404 so the caller decides
+#         (a DELETE answered 5xx may still have gone through).
+# Returns 0 on success, 44 on a 404 in 5xx mode, 1 otherwise.
+gh_api_retry() {
+  local mode=$1 attempt
+  shift
+  for attempt in 1 2 3 4 5; do
+    if GH_OUT=$(gh api "$@" 2>&1); then
+      return 0
+    fi
+    if [ "$mode" = 5xx ]; then
+      if [[ "$GH_OUT" == *'"status":"404"'* || "$GH_OUT" == *'(HTTP 404)'* ]]; then
+        return 44
+      fi
+      [[ "$GH_OUT" == *'(HTTP 5'[0-9][0-9]')'* ]] || return 1
+    fi
+    [ "$attempt" -lt 5 ] || return 1
+    echo "gh api $1 failed (attempt ${attempt}/5), retrying in $((attempt * 5))s..." >&2
+    sleep "$((attempt * 5))"
+  done
+}
+
+if ! gh_api_retry any "/users/${OWNER}/packages/container/${PACKAGE}/versions" --paginate; then
+  echo "$GH_OUT" >&2
+  exit 1
+fi
+VERSIONS_JSON=$GH_OUT
 
 # GHCR groups every tag pointing at the same digest into ONE version object.
 # A single build push (latest + <version> + auto-YYYYMMDD.N, all one digest)
@@ -101,22 +120,14 @@ for id in "${DELETE_IDS[@]}"; do
   # real failure.
   #
   # A 5xx is GHCR, not us (squid-hardened, 2026-11-11, run 43024405022: one
-  # 502 turned a published build red): retry it, like the listing above. A
+  # 502 turned a published build red): retry it, through the same gh_api_retry as the listing. A
   # DELETE answered 5xx may still have gone through, which is why a 404 on
   # the retry counts as success. Any other error (403...) aborts at once.
-  for attempt in 1 2 3 4 5; do
-    if output=$(gh api --method DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" 2>&1); then
-      break
-    fi
-    if [[ "$output" == *'"status":"404"'* || "$output" == *'(HTTP 404)'* ]]; then
-      echo "  (already deleted, skipping)"
-      break
-    fi
-    if [[ "$output" != *'(HTTP 5'[0-9][0-9]')'* ]] || [ "$attempt" -eq 5 ]; then
-      echo "$output" >&2
-      exit 1
-    fi
-    echo "  DELETE failed with a 5xx (attempt ${attempt}/5), retrying in $((attempt * 5))s..." >&2
-    sleep "$((attempt * 5))"
-  done
+  rc=0
+  gh_api_retry 5xx --method DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" || rc=$?
+  case $rc in
+    0) ;;
+    44) echo "  (already deleted, skipping)" ;;
+    *) echo "$GH_OUT" >&2; exit 1 ;;
+  esac
 done
