@@ -1,25 +1,29 @@
 # hardened-ci
 
-Shared CI building blocks for the `jbsky/*-hardened` container images
-(bind9, nginx, php-fpm, varnish, suricata, squid/c-icap/clamav, uptime-kuma).
+[![Test](https://github.com/jbsky/hardened-ci/actions/workflows/test.yml/badge.svg)](https://github.com/jbsky/hardened-ci/actions/workflows/test.yml)
+[![Lint](https://github.com/jbsky/hardened-ci/actions/workflows/lint.yml/badge.svg)](https://github.com/jbsky/hardened-ci/actions/workflows/lint.yml)
 
-Each of those repositories used to carry its own copy of the same ~1 200 lines
+Shared CI building blocks for the `jbsky/*-hardened` container images: bind9,
+haproxy, nginx, php-fpm, squid (+ c-icap, clamav), suricata, traefik,
+uptime-kuma and varnish.
+
+Each of those repositories used to carry its own copy of the same ~1,200 lines
 of GitHub Actions and of six shared scripts, kept in sync by hand. This
-repository is meant to hold them once:
+repository holds them once:
 
 | Kind | Shares | Used for |
 |---|---|---|
-| Reusable workflows (`on: workflow_call`) | whole jobs | `cve-watch`, `registry-cleanup`, `security-audit`, later `build-push` |
-| Composite actions (`action.yml`) | steps + their scripts (via `github.action_path`) | revision counter, image manifest, dependency closure, README tags |
+| Reusable workflows (`on: workflow_call`) | whole jobs | `build-push`, `base-watch`, `cve-watch`, `registry-cleanup`, `security-audit` |
+| Composite actions (`action.yml`) | steps + their scripts (via `github.action_path`) | `versions` (check + build-args), `tools` (the shared scripts at the pinned ref) |
 
 ## The pipeline of an image repository
 
-What every `*-hardened` repository runs. Since v1.0.0 the whole `build-push`
-pipeline and the weekly audit are reusable workflows of this repository
-(highlighted); an image repository keeps only its triggers and one
-description file, `.github/hardened-ci.json`. `version-watch` stays local (its
-logic is per upstream); stack-squid (three images tested together) keeps its
-own `build-push` and `security-audit`.
+What every `*-hardened` repository runs. The whole `build-push` pipeline and
+the weekly audit are reusable workflows of this repository (highlighted); an
+image repository keeps only its triggers and one description file,
+`.github/hardened-ci.json`. The upstream version watch stays local, because its
+logic is per upstream (`version-watch.yml`; `version-check.yml` in
+squid-hardened; none in haproxy-hardened).
 
 ```mermaid
 flowchart LR
@@ -32,7 +36,7 @@ flowchart LR
     rev["revision<br/>&lt;version&gt;.&lt;revision&gt;<br/>already published? skip"]
     promote["promote<br/>tags on the TESTED digest<br/>cosign sign, SBOM attest"]
     readme["update-readme"]
-    cleanup["cleanup<br/>(registry-cleanup)"]
+    cleanup["cleanup<br/>(prune old tags)"]
     release["release (tags v*)"]
     notify["notify<br/>issue on failure"]
     lint --> build --> test --> promote
@@ -60,21 +64,26 @@ flowchart LR
   class vw local
 ```
 
-| Block | Lives in | Since / plan |
+| Block | Lives in | Since |
 |---|---|---|
-| `versions` check + build-args (in lint, build, build-arm64) | **hardened-ci** action `versions/` | v0.1.0 -> v0.7.0, on all 7 |
-| `cve-watch` | **hardened-ci** reusable workflow | v0.3.0, step 1 |
-| `registry-cleanup` (cleanup job) | **hardened-ci** reusable workflow, runs ITS OWN `prune-*` (checkout at `job.workflow_sha`) | v0.3.0 step 1; own scripts since v0.8.0 |
-| 6 shared scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | **hardened-ci** `scripts/`, reached through the `tools/` action | v0.8.0, step 2 -- on all 7 |
-| `security-audit` | **hardened-ci** reusable workflow | v1.0.0, step 3 (stack-squid keeps its own) |
-| `build-push` jobs (lint ... notify) | **hardened-ci** reusable workflow + `.github/hardened-ci.json` | v1.0.0, step 4 (stack-squid keeps its own) |
-| `base-watch` | **hardened-ci** reusable workflow + script `base-digests.py` | v1.2.0, on all 8 |
-| `version-watch` | each repository | stays local (logic is per upstream) |
+| `versions` check + build-args (in lint, build, build-arm64) | **hardened-ci** action `versions/` | v0.1.0 |
+| `cve-watch` | **hardened-ci** reusable workflow | v0.3.0; Alpine package CVEs rebuilt on their own since v1.4.0 |
+| `registry-cleanup` | **hardened-ci** reusable workflow, runs ITS OWN `prune-*` (checkout at `job.workflow_sha`) | v0.3.0; own scripts since v0.8.0 |
+| 6 shared scripts (`build-revision`, `image-manifest`, `check-image-closure`, `prune-*`, `update-readme-tags`) | **hardened-ci** `scripts/`, reached through the `tools/` action | v0.8.0 |
+| `security-audit` | **hardened-ci** reusable workflow | v1.0.0 |
+| `build-push` jobs (lint ... notify) | **hardened-ci** reusable workflow + `.github/hardened-ci.json` | v1.0.0; several images per repository since v1.3.0 |
+| `base-watch` | **hardened-ci** reusable workflow + script `base-digests.py` | v1.2.0 |
+| upstream version watch | each repository | stays local (logic is per upstream) |
+
+All nine image repositories run `build-push`, `base-watch`, `cve-watch` and
+`security-audit` from here; seven of them also keep a manual
+`registry-cleanup.yml` that calls the shared workflow.
 
 On a pull request the image is built and tested from a tarball, never pushed:
-`build-arm64`, `revision`, `promote` and what follows are skipped (bind9 adds a
-`validate` job that builds both architectures on PRs, each on its native runner). A `push` run re-tests the
-exact digest it will tag -- a gate green on the PR is not proof for the push.
+`build-arm64`, `revision`, `promote` and what follows are skipped
+(`validate_on_pr: true`, set by bind9, also builds both architectures on pull
+requests, each on its native runner). A `push` run re-tests the exact digest
+it will tag -- a gate green on the PR is not proof for the push.
 
 Building blocks land one at a time, each one first adopted by a single canary
 repository. Every block is tested here **both ways**: it passes on a conforming
@@ -131,12 +140,12 @@ single defect into a conforming repository and requires the matching error.
 
 The final images are `FROM scratch`: no apk database, a scanner sees nothing.
 `build-push` attests a CycloneDX SBOM of the `prep` stage on every published
-digest; `cve-watch` verifies that attestation on `:latest` (signed by the
-caller's `build-push.yml`, or by this repository's once `build-push` is shared),
-runs Trivy on it, and keeps one `cve` issue per image: opened on a fixable
-HIGH/CRITICAL CVE, commented when the list changes, closed when it is empty.
-No SBOM = one "audit impossible" issue, never a silent "0 CVE". The issue
-mentions the repository owner, so the e-mail does not depend on Watch settings.
+digest; `cve-watch` verifies that attestation on `:latest` (signed by this
+repository's `build-push`), runs Trivy on it, and keeps one `cve` issue per
+image: opened on a fixable HIGH/CRITICAL CVE, commented when the list changes,
+closed when it is empty. No SBOM = one "audit impossible" issue, never a
+silent "0 CVE". The issue mentions the repository owner, so the e-mail does
+not depend on Watch settings.
 
 ```yaml
 on:
@@ -242,13 +251,19 @@ and each of those three errors.
 ### `registry-cleanup` -- prune old immutable tags (reusable workflow)
 
 Keeps the last `keep-count` (default 6) immutable tags per image plus
-`:latest`, on GHCR and, when its secrets are passed, Docker Hub. Secrets are
-passed explicitly (`secrets: inherit` is not guaranteed across repositories of
-a personal account), and the calling job must grant `packages: write`.
+`:latest`, on GHCR and, when its secrets are passed, Docker Hub; the short
+version tags are protected by the prune scripts themselves. Old tags would
+otherwise keep pointing at genuinely vulnerable builds that stay publicly
+pullable. `build-push` runs the same scripts in its `cleanup` job after every
+promotion, with 6 kept; most image repositories also keep a manual
+`registry-cleanup.yml` that calls this workflow.
+
+Secrets are passed explicitly (`secrets: inherit` is not guaranteed across
+repositories of a personal account), and the calling job must grant
+`packages: write`.
 
 ```yaml
 cleanup:
-  needs: promote
   permissions: {contents: read, packages: write}
   uses: jbsky/hardened-ci/.github/workflows/registry-cleanup.yml@<sha> # vX.Y.Z
   with:
@@ -338,31 +353,21 @@ jobs:
 ```
 
 The pipeline fetches this repository at `job.workflow_sha` for its actions and
-scripts. **Signing identity**: images are signed by this workflow, so the
-certificate identity is `jbsky/hardened-ci/.github/workflows/build-push.yml@...`
-and the certificate also carries the calling repository. Verify both:
-
-```sh
-cosign verify ghcr.io/jbsky/<image>:<tag> \
-  --certificate-identity-regexp '^https://github.com/(jbsky/<repo>|jbsky/hardened-ci)/' \
-  --certificate-github-workflow-repository jbsky/<repo> \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-Without the repository pin, any repository calling this public workflow would
-produce an accepted identity. `fixture.yml` (manual) publishes the
-`template/` image for real and proves both directions: accepted for the right
-repository, refused for another. `test.yml` runs the whole pipeline on
-`template/` in PR mode on every PR.
+scripts. See [Signing identity](#signing-identity) for how its signatures are
+verified. `fixture.yml` (manual) publishes the `template/` image for real and
+proves both directions: accepted for the right repository, refused for
+another. `test.yml` runs the whole pipeline on `template/` in PR mode on every
+PR.
 
 #### A repository that publishes SEVERAL images
 
-`stack-squid` publishes three (`squid`, `c-icap`, `clamav`) and its EICAR test
-exercises them **together**, through one `docker compose`, before any of them is
-promoted. That is why they are one call and not three: `build` is a matrix over
-the declared images, `test` runs **once** on the digests just built, and
-`promote` is a matrix that only runs if that shared test passed. Three images
-cannot be promoted independently when the thing being tested is the chain.
+`squid-hardened` publishes three (`squid`, `c-icap`, `clamav`) and its EICAR
+test exercises them **together**, through one `docker compose`, before any of
+them is promoted. That is why they are one call and not three: `build` is a
+matrix over the declared images, `test` runs **once** on the digests just
+built, and `promote` is a matrix that only runs if that shared test passed.
+Three images cannot be promoted independently when the thing being tested is
+the chain.
 
 ```json
 {
@@ -412,13 +417,40 @@ CI instantiates it on every PR and proves it both ways: it passes the check,
 the check fails once a version is hard-coded, a build without build-args fails
 at the guard, and the built image carries the version from `versions.json`.
 
+## The README of an image repository
+
+Every image README follows the same outline, in English: title and badges
+(build, Docker Hub, hardening tier), a short introduction, then **What is
+built**, **Hardening**, **Tags**, **Usage**, the sections specific to the
+image, **Build and test**, **Verification** and **License**. The Tags,
+Verification and License sections use the same wording everywhere, so a
+difference between two READMEs is a real difference between two images.
+
+After each promotion, the `update-readme` job renders every version-bearing
+part of the README from the values it just published
+(`scripts/update-readme-tags.sh`, pushed by `scripts/publish-readme.sh`):
+
+- the table between the `<!-- BEGIN:tags ... -->` and `<!-- END:tags -->`
+  markers, one row per image;
+- inline spans hidden by HTML comments: `<!--v:<image>-->...<!--/v-->` (upstream
+  version) and `<!--t:<image>-->...<!--/t-->` (immutable tag);
+- every tagged reference `jbsky/<image>:<tag>`, with or without a registry
+  prefix; `:latest` is left alone.
+
+These are the only places a version may appear: a guard fails the job on any
+other token of the image's version family. A line that legitimately names an
+old version ends with `<!-- version-fixe -->`. The tag block is derived data,
+never edited by hand: a push refused because another run wrote first is
+re-rendered on the new head rather than rebased, and a late run never moves a
+tag backwards.
+
 ## Pinning policy
 
 Callers pin a **full commit SHA**, with the release tag as a comment, never a
 branch:
 
 ```yaml
-uses: jbsky/hardened-ci/.github/workflows/cve-watch.yml@<40-char sha> # v1.2.0
+uses: jbsky/hardened-ci/.github/workflows/cve-watch.yml@<40-char sha> # vX.Y.Z
 ```
 
 - `@main` would let one push here break every image pipeline at once.
@@ -438,11 +470,24 @@ workflow can only lower them.
 ## Signing identity
 
 Keyless cosign signatures carry the identity of the workflow that runs the
-job. Once signing moves into a reusable workflow hosted here, that identity
-becomes this repository's workflow, not the image repository's. Verifiers
-(README commands, `cve-watch`, `security-audit`) must accept both identities
-before that move. Until then, signing stays in each image repository.
+job. Images are signed by this repository's `build-push.yml`, so the
+certificate identity is `jbsky/hardened-ci/.github/workflows/build-push.yml@...`,
+and the certificate also carries the calling repository. Signatures made
+before the move carry the image repository's own workflow. Verifiers (image
+READMEs, `cve-watch`, `security-audit`) accept both identities and always pin
+the calling repository:
+
+```sh
+cosign verify ghcr.io/jbsky/<image>:<tag> \
+  --certificate-identity-regexp '^https://github.com/(jbsky/<repo>|jbsky/hardened-ci)/' \
+  --certificate-github-workflow-repository jbsky/<repo> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Without the repository pin, any repository calling this public workflow would
+produce an accepted identity.
 
 ## License
 
-Apache-2.0, like the image repositories.
+The contents of this repository are licensed under **Apache-2.0**, like the
+image repositories, see [`LICENSE`](LICENSE). Copyright 2026 jbsky.
