@@ -243,6 +243,9 @@ jobs:
       - name: publish-readme -- course entre deux runs, jamais de recul de tag
         run: ./tests/scripts/publish-readme.sh
 
+      - name: update-readme-tags -- marqueur francais migre, garde, references
+        run: ./tests/scripts/update-readme-tags.sh
+
       - name: prune-ghcr -- un 5xx se retente, un 404 au retry est un succes
         run: ./tests/scripts/prune-ghcr.sh
 
