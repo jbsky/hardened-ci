@@ -1,33 +1,35 @@
-# Gabarit d'image durcie
+# Hardened image template
 
-Point de depart d'un nouveau depot `<app>-hardened`. Il ne contient que ce
-qui doit etre vrai **des le premier commit** ; le reste (telechargement
-verifie, compilation durcie, stage `prep` scanne, cloture, manifeste,
-publication signee) s'ajoute ensuite, sans casser ce qui suit.
+Starting point of a new `<app>-hardened` repository. It only holds what must
+be true **from the first commit**; the rest (verified download, hardened
+build, scanned `prep` stage, closure, manifest, signed publication) comes
+afterwards, without breaking what follows.
 
 ```sh
-./scripts/new-image.sh ../<app>-hardened   # depuis la racine de hardened-ci
+./scripts/new-image.sh ../<app>-hardened   # from the root of hardened-ci
 ```
 
-`new-image.sh` copie ce gabarit et y ajoute les scripts partages depuis leur
-copie de reference (`hardened-ci/scripts/`) : le gabarit n'en porte aucune
-copie qui pourrait deriver.
+`new-image.sh` copies this template and adds the shared scripts from their
+reference copy (`hardened-ci/scripts/`): the template carries no copy of them
+that could drift. It does not copy this file: the new repository's README
+follows the outline described in
+[the hardened-ci README](../README.md#the-readme-of-an-image-repository).
 
-## Deja en place : versions.json fait autorite
+## Already in place: versions.json is authoritative
 
-- `versions.json` est le **seul** endroit ou une version s'ecrit ;
-- le `Dockerfile` n'a aucune valeur par defaut et echoue au garde si un
-  build-arg manque ;
-- `make build` et la CI passent les build-args par
-  `scripts/versions-build-args.py` ;
-- le job `lint` lance `--check` et son test unitaire, le job `build` l'action
-  `jbsky/hardened-ci/versions` (epinglee par SHA, Dependabot la bumpe).
+- `versions.json` is the **only** place a version is written;
+- the `Dockerfile` has no default value and fails at the guard when a
+  build-arg is missing;
+- `make build` and CI pass the build-args through
+  `scripts/versions-build-args.py`;
+- the `lint` job runs `--check` and its unit test, the `build` job the
+  `jbsky/hardened-ci/versions` action (pinned by SHA, bumped by Dependabot).
 
-En ajoutant une dependance : une cle dans `versions.json` (`foo`, `foo_sha256`),
-l'`ARG` correspondant (`FOO_VERSION`, `FOO_SHA256`) sans valeur, et une ligne
-de plus dans le garde. `make check` dit ce qui manque.
+When adding a dependency: one key in `versions.json` (`foo`, `foo_sha256`),
+the matching `ARG` (`FOO_VERSION`, `FOO_SHA256`) without a value, and one more
+line in the guard. `make check` tells what is missing.
 
-La CI de hardened-ci instancie ce gabarit a chaque PR et verifie qu'il passe
-le controle, que le controle echoue quand on y injecte une version en dur,
-qu'un build sans argument echoue au garde, et que l'image construite porte
-bien la version de `versions.json`.
+The hardened-ci CI instantiates this template on every PR and checks that it
+passes the check, that the check fails when a hard-coded version is injected,
+that a build without arguments fails at the guard, and that the built image
+carries the version from `versions.json`.
