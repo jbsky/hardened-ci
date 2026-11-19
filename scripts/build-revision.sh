@@ -22,10 +22,10 @@
 #        version read from a JSON file that is not versions.json
 #    build-revision.sh --source <file> --grep <perl_regex> -- <path>...
 #        version scraped from a tracked file (php reads its own FROM line)
-#    build-revision.sh --unanchored -- <path>...
-#        no version recorded in git (nginx resolves it from upstream at build
-#        time), so the counter runs from the root commit instead of resetting.
-#        Tags stay unique because the version prefix changes on its own.
+#
+#  The version must be recorded in git: an unanchored mode (count from the
+#  root commit, never reset) existed for nginx while its version was resolved
+#  at build time, and was removed once versions.json carried it.
 #
 #  <path>... are that image's build inputs. Keep them in step with the
 #  workflow's push `paths:` filter, minus the workflow file itself: editing
@@ -36,13 +36,8 @@ set -euo pipefail
 SOURCE="versions.json"
 JQ_KEY=""
 GREP_RE=""
-ANCHORED=true
 
-if [ "${1:-}" = "--unanchored" ]; then
-  ANCHORED=false
-  shift
-  [ "${1:-}" = "--" ] && shift
-elif [ "${1:-}" = "--source" ]; then
+if [ "${1:-}" = "--source" ]; then
   while [ "${1:-}" != "--" ] && [ "$#" -gt 0 ]; do
     case "$1" in
       --source)  SOURCE="$2"; shift 2 ;;
@@ -52,6 +47,8 @@ elif [ "${1:-}" = "--source" ]; then
     esac
   done
   shift  # the --
+elif [[ "${1:-}" == --* ]]; then
+  echo "build-revision: unknown option $1" >&2; exit 1
 else
   JQ_KEY="${1:?usage: build-revision.sh <jq_key> <path>...}"
   shift
@@ -82,21 +79,18 @@ read_version() {
   fi
 }
 
+CURRENT=$(read_version "")
+[ -n "$CURRENT" ] || { echo "build-revision: no version found in ${SOURCE}" >&2; exit 1; }
+
+# Walk the source file backwards to the oldest commit that already carries
+# the current value: that commit is where this upstream version was introduced.
 BASE=""
-if [ "$ANCHORED" = true ]; then
-  CURRENT=$(read_version "")
-  [ -n "$CURRENT" ] || { echo "build-revision: no version found in ${SOURCE}" >&2; exit 1; }
+while read -r sha; do
+  [ "$(read_version "$sha")" = "$CURRENT" ] || break
+  BASE="$sha"
+done < <(git log --format=%H -- "$SOURCE")
 
-  # Walk the source file backwards to the oldest commit that already carries
-  # the current value: that commit is where this upstream version was introduced.
-  while read -r sha; do
-    [ "$(read_version "$sha")" = "$CURRENT" ] || break
-    BASE="$sha"
-  done < <(git log --format=%H -- "$SOURCE")
-fi
-
-# No anchor (unanchored, or the version never changed in history): count from
-# the root commit.
+# No anchor (the source file is not committed yet): count from the root commit.
 if [ -n "$BASE" ]; then
   git rev-list --count "${BASE}..HEAD" -- "$@"
 else
