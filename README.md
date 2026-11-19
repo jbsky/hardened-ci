@@ -297,8 +297,8 @@ path:
 ```
 
 Tested both ways in `test.yml` (job `scripts`): `build-revision` on a git
-history with known counts for the three call forms, plus a shallow clone that
-must be refused; `check-image-closure` on a complete and a broken
+history with known counts for the two call forms, plus an unknown option and a
+shallow clone that must both be refused; `check-image-closure` on a complete and a broken
 (`libssl.so.3` missing) fixture image; `image-manifest --check` on an identical
 image and on the same image plus one file. ShellCheck on every script.
 

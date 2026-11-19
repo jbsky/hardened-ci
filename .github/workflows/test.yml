@@ -210,8 +210,8 @@ jobs:
           [ "$n_go" -ge 1 ] || { echo "::error::la SBOM fusionnee n'a pas remonte la CVE de la stdlib Go"; exit 1; }
 
   # Les six scripts partages (etape 2) : chacun eprouve dans les deux sens.
-  # build-revision sur un historique git connu (les trois formes d'appel des
-  # depots + clone superficiel refuse) ; cloture et manifeste sur des images
+  # build-revision sur un historique git connu (les deux formes d'appel des
+  # depots, option inconnue et clone superficiel refuses) ; cloture et manifeste sur des images
   # temoins minuscules (complete / trouee, identique / un fichier de plus).
   scripts:
     name: Scripts partages (revision, cloture, manifeste, tools)

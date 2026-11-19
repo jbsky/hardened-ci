@@ -25,14 +25,22 @@ echo 'FROM php:8.5.2-fpm-alpine' > Dockerfile; c c4
 
 expect 2 "positionnel (versions.json)" app Dockerfile conf/
 expect 0 "--source --grep (ligne FROM)" --source Dockerfile --grep '^FROM php:\K[0-9.]+' -- Dockerfile conf/
-expect 3 "--unanchored" --unanchored -- Dockerfile conf/
 
 echo '{"app":"1.1"}' > versions.json; c c5     # montee de version : le compteur repart
 echo c > conf/a; c c6
 
 expect 1 "positionnel apres montee" app Dockerfile conf/
 expect 1 "--source --grep apres c6" --source Dockerfile --grep '^FROM php:\K[0-9.]+' -- Dockerfile conf/
-expect 4 "--unanchored apres c6" --unanchored -- Dockerfile conf/
+
+# Option inconnue (dont l'ancien --unanchored, retire) : refusee, jamais
+# prise pour une cle de versions.json ni comptee depuis le commit racine.
+if out=$("$BR" --unanchored -- Dockerfile conf/ 2>&1); then
+  echo "FAIL --unanchored accepte ($out)"; fail=1
+elif [ "$out" != "build-revision: unknown option --unanchored" ]; then
+  echo "FAIL --unanchored : message inattendu ($out)"; fail=1
+else
+  echo "ok   option inconnue refusee"
+fi
 
 # Clone superficiel : refuse, jamais un .0 silencieux.
 cd "$T"; git clone -q --depth 1 "file://$T/repo" shallow; cd shallow
