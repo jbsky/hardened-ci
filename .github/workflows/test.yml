@@ -249,6 +249,9 @@ jobs:
       - name: prune-ghcr -- un 5xx se retente, un 404 au retry est un succes
         run: ./tests/scripts/prune-ghcr.sh
 
+      - name: prep-fidelity -- l'image publiee contient ce que prep a construit
+        run: ./tests/scripts/prep-fidelity.sh
+
       - name: Action tools
         id: hci
         uses: ./tools
