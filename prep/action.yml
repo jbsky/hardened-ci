@@ -33,7 +33,7 @@ inputs:
     description: Nom de l'image ; l'image locale sera <image-name>-prep:scan
     required: true
   cache-scope:
-    description: Scope du cache gha a LIRE (jamais ecrit ici)
+    description: Scope du cache gha (lu et ecrit ici ; le build final n'en utilise plus)
     required: true
 outputs:
   context:
@@ -61,7 +61,10 @@ runs:
         # Le stage prep porte les paquets qui finissent dans l'image : jamais
         # du cache, sinon manifeste et scan CVE examinent des paquets perimes.
         no-cache-filters: prep
+        # Le seul cache du build : les stages lourds dont prep depend
+        # (compilation, npm). Le build de l'image finale n'en lit aucun.
         cache-from: type=gha,scope=${{ inputs.cache-scope }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
     - name: Contexte nomme + image locale
       id: ctx
       shell: bash
