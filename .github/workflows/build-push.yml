@@ -270,6 +270,22 @@ jobs:
         if: env.PUBLISH != 'true'
         run: mkdir -p /tmp/image-tar
 
+      # prep construit UNE fois, puis servi aux scans ET au build de l'image
+      # (contexte nomme) : ce qui est copie dans l'image est ce qui est scanne
+      # et atteste. Jusqu'a v1.4.11 il etait resolu deux fois, et le
+      # 2026-11-18 uptime-kuma 2.5.12.0 a ete publiee avec la couche prep du
+      # 2026-11-16 (node v24.22.1) sous une SBOM qui disait 24.22.3.
+      - name: Build prep stage (Alpine with runtime deps)
+        id: prep
+        uses: ./.hardened-ci/prep
+        with:
+          context: ${{ matrix.image.path }}
+          file: ${{ matrix.image.file }}
+          build-args: ${{ steps.build-args.outputs.build-args }}
+          platform: linux/amd64
+          image-name: ${{ env.IMAGE_NAME }}
+          cache-scope: ${{ env.IMAGE_NAME }}-amd64
+
       - name: Build (push-by-digest, or local tarball on PR)
         id: build
         uses: docker/build-push-action@v7
@@ -277,6 +293,7 @@ jobs:
           context: ${{ matrix.image.path }}
           file: ${{ matrix.image.file }}
           build-args: ${{ steps.build-args.outputs.build-args }}
+          build-contexts: ${{ steps.prep.outputs.context }}
           platforms: linux/amd64
           outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0}/{1}/{2},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.NAMESPACE, env.IMAGE_NAME) || format('type=docker,dest=/tmp/image-tar/{0}.tar', env.KEY) }}
           tags: ${{ env.PUBLISH != 'true' && steps.local.outputs.tag || '' }}
@@ -284,26 +301,32 @@ jobs:
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
           cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-amd64
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-amd64
-          # Le stage prep porte les paquets qui finissent dans l'image : jamais
-          # du cache, sinon manifeste et scan CVE examinent des paquets perimes.
+          # prep arrive par build-contexts ; le filtre reste en filet si un
+          # Dockerfile copiait d'un stage prep que le contexte ne remplace pas.
           no-cache-filters: prep
+
+      # La preuve sur le contenu, pas sur le mecanisme : chaque fichier de
+      # l'image qui a un homologue dans prep doit etre le meme, a l'octet.
+      - name: Fidelite de prep (l'image contient ce que prep a construit)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          LOCAL_TAG: ${{ steps.local.outputs.tag }}
+          PREP_IMAGE: ${{ steps.prep.outputs.image }}
+          SCRIPTS: ${{ github.workspace }}/.hardened-ci/scripts
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" = true ]; then
+            ref="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
+            docker pull -q "$ref"
+          else
+            docker load -i "/tmp/image-tar/${KEY}.tar"
+            ref="$LOCAL_TAG"
+          fi
+          "$SCRIPTS/check-prep-fidelity.sh" "$ref" "$PREP_IMAGE"
 
       # Le seul stage encore lisible par un scanner : les paquets runtime copies
       # dans l'image FROM scratch. SARIF large (CRITICAL+HIGH), echec etroit
       # (CRITICAL corrigeables seulement).
-      - name: Build prep stage (Alpine with runtime deps)
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.image.path }}
-          file: ${{ matrix.image.file }}
-          build-args: ${{ steps.build-args.outputs.build-args }}
-          target: prep
-          platforms: linux/amd64
-          load: true
-          tags: ${{ env.IMAGE_NAME }}-prep:scan
-          no-cache-filters: prep
-          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-amd64
-
       - name: Trivy scan prep stage (report CRITICAL+HIGH)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -628,6 +651,17 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Meme regle qu'en amd64 : prep construit une fois, copie tel quel.
+      - name: Build prep stage (arm64)
+        id: prep
+        uses: ./.hardened-ci/prep
+        with:
+          context: ${{ matrix.image.path }}
+          file: ${{ matrix.image.file }}
+          build-args: ${{ steps.build-args.outputs.build-args }}
+          platform: linux/arm64
+          image-name: ${{ env.IMAGE_NAME }}
+          cache-scope: ${{ env.IMAGE_NAME }}-arm64
       - name: Build & Push by digest
         id: build
         uses: docker/build-push-action@v7
@@ -635,6 +669,7 @@ jobs:
           context: ${{ matrix.image.path }}
           file: ${{ matrix.image.file }}
           build-args: ${{ steps.build-args.outputs.build-args }}
+          build-contexts: ${{ steps.prep.outputs.context }}
           platforms: linux/arm64
           sbom: true
           provenance: mode=max
@@ -642,6 +677,16 @@ jobs:
           cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-arm64
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-arm64
           no-cache-filters: prep
+      - name: Fidelite de prep (arm64)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PREP_IMAGE: ${{ steps.prep.outputs.image }}
+          SCRIPTS: ${{ github.workspace }}/.hardened-ci/scripts
+        run: |
+          set -euo pipefail
+          ref="${REGISTRY}/${NAMESPACE}/${IMAGE_NAME}@${DIGEST}"
+          docker pull -q "$ref"
+          "$SCRIPTS/check-prep-fidelity.sh" "$ref" "$PREP_IMAGE"
 
       - name: Upload digest arm64
         env:
