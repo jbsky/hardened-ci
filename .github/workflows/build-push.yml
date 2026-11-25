@@ -299,11 +299,14 @@ jobs:
           tags: ${{ env.PUBLISH != 'true' && steps.local.outputs.tag || '' }}
           sbom: ${{ env.PUBLISH }}
           provenance: ${{ env.PUBLISH == 'true' && 'mode=max' || 'false' }}
-          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-amd64
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-amd64
-          # prep arrive par build-contexts ; le filtre reste en filet si un
-          # Dockerfile copiait d'un stage prep que le contexte ne remplace pas.
-          no-cache-filters: prep
+          # JAMAIS de cache pour l'image finale. Meme avec prep frais en
+          # contexte, BuildKit a resservi depuis le cache gha les
+          # `COPY --link --from=prep` de varnish (2026-11-25, PR #60 : toutes
+          # CACHED, ca-certificates.crt perime attrape par la porte) -- comme
+          # la couche prep de uptime-kuma 2.5.12.0. Le cache des stages lourds
+          # vit dans le build de prep (action prep, cache-to) ; ici ne restent
+          # que des COPY et les stages que l'image copie sans passer par prep.
+          no-cache: true
 
       # La preuve sur le contenu, pas sur le mecanisme : chaque fichier de
       # l'image qui a un homologue dans prep doit etre le meme, a l'octet.
@@ -674,9 +677,8 @@ jobs:
           sbom: true
           provenance: mode=max
           outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-arm64
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-arm64
-          no-cache-filters: prep
+          # Jamais de cache pour l'image finale (voir le job amd64).
+          no-cache: true
       - name: Fidelite de prep (arm64)
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
